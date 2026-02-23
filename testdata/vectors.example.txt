@@ -1,0 +1,14 @@
+# Example manifest for Opus conformance vectors.
+#
+# Each non-empty, non-comment line is:
+#
+#   <name> <bit> <dec> <fs_hz> <channels>
+#
+# Notes:
+# - Opus packets do not signal channel count; the container does.
+# - `fs_hz` is the *requested output* sampling rate for the decoder.
+#
+# Example (fill in real values for your vector set):
+#
+# testvector01 testvector01.bit testvector01.dec 48000 1
+

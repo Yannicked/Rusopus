@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/opus-decoder",
+  "crates/opus-cli",
+  "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+license = "BSD-3-Clause"
+
