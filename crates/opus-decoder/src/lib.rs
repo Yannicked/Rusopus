@@ -10,8 +10,11 @@ mod celt;
 mod entropy;
 mod packet;
 pub mod compare;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use error::Error;
+
+static TRACE_DECODE_PACKET_IDX: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 pub struct Decoder {
@@ -108,6 +111,10 @@ impl Decoder {
     /// - `out` must be large enough for the maximum frame size (120 ms).
     /// - Returns the number of samples per channel written.
     pub fn decode(&mut self, packet: Option<&[u8]>, out: &mut [i16]) -> Result<usize, Error> {
+        let packet_idx = TRACE_DECODE_PACKET_IDX.fetch_add(1, Ordering::SeqCst);
+        let trace_packet_idx = std::env::var("OPUS_TRACE_PACKET_IDX")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
         let (toc, samples_per_channel_needed) = match packet {
             Some(packet) => {
                 let pp = packet::parse_packet(packet)?;
@@ -142,6 +149,30 @@ impl Decoder {
 
         // Parse again to get per-frame slices.
         let pp = packet::parse_packet(packet.unwrap())?;
+        if trace_packet_idx == Some(packet_idx) {
+            // #region agent log
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+            {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let line = format!(
+                    "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:151\",\"message\":\"packet_vs_decoder_channels\",\"data\":{{\"packet_idx\":{},\"packet_channels\":{},\"decoder_channels\":{},\"toc\":{},\"config\":{}}},\"timestamp\":{}}}\n",
+                    packet_idx,
+                    pp.packet_channels,
+                    self.channels,
+                    pp.toc,
+                    config,
+                    ts
+                );
+                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+            }
+            // #endregion
+        }
         self.last_packet_split_count = 0;
         self.last_packet_is_transient = false;
 
@@ -156,6 +187,7 @@ impl Decoder {
                     frame,
                     frame_samples_48k,
                     config,
+                    pp.packet_channels,
                     &mut out[written_per_channel * self.channels as usize..],
                 )?;
             self.last_packet_split_count += self.celt.last_split_count();

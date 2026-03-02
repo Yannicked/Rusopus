@@ -79,6 +79,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
     let mut dec = Decoder::new(v.fs_hz, v.channels)?;
     let mut out = vec![0i16; dec.max_frame_size_per_channel() * v.channels as usize];
     let mut got_pcm = Vec::<i16>::new();
+    let mut packet_end_samples = Vec::<usize>::new();
     let mut final_range_mismatches: Vec<(usize, u32, u32)> = Vec::new();
     let trace_packet_idx = std::env::var("OPUS_TRACE_PACKET_IDX")
         .ok()
@@ -96,6 +97,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             Ok(samples_per_channel) => {
                 let written = samples_per_channel * v.channels as usize;
                 got_pcm.extend_from_slice(&out[..written]);
+                packet_end_samples.push(got_pcm.len());
                 if trace_pkt0_pcm8 && packet_idx == 0 && written >= 8 {
                     eprintln!(
                         "[RUST] pkt0 pcm[0..8]: {} {} {} {} {} {} {} {}",
@@ -216,6 +218,150 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
 
     // Reference conformance uses `opus_compare` (quality metric), not a
     // byte-exact PCM match.
+    if expected_pcm != got_pcm {
+        let min_len = expected_pcm.len().min(got_pcm.len());
+        let first_diff = (0..min_len).find(|&i| expected_pcm[i] != got_pcm[i]);
+        if let Some(sample_idx) = first_diff {
+            let packet_idx = packet_end_samples.partition_point(|&end| end <= sample_idx);
+            let mut diff_csv = String::new();
+            let mut logged = 0usize;
+            for i in sample_idx..min_len {
+                if expected_pcm[i] != got_pcm[i] {
+                    if !diff_csv.is_empty() {
+                        diff_csv.push(';');
+                    }
+                    let delta = got_pcm[i] as i32 - expected_pcm[i] as i32;
+                    diff_csv.push_str(&format!("{i}:{}:{}:{delta}", expected_pcm[i], got_pcm[i]));
+                    logged += 1;
+                    if logged == 16 {
+                        break;
+                    }
+                }
+            }
+            eprintln!(
+                "[RUST] first_pcm_diff sample={} packet={} expected={} got={}",
+                sample_idx, packet_idx, expected_pcm[sample_idx], got_pcm[sample_idx]
+            );
+            // #region agent log
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+            {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let line = format!(
+                    "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H18\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:223\",\"message\":\"first_pcm_diff\",\"data\":{{\"sample_idx\":{},\"packet_idx\":{},\"expected\":{},\"got\":{},\"expected_len\":{},\"got_len\":{},\"first_diffs_csv\":\"{}\"}},\"timestamp\":{}}}\n",
+                    sample_idx,
+                    packet_idx,
+                    expected_pcm[sample_idx],
+                    got_pcm[sample_idx],
+                    expected_pcm.len(),
+                    got_pcm.len(),
+                    diff_csv,
+                    ts
+                );
+                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+            }
+            // #endregion
+        }
+        let mut top = [(0i32, 0usize); 5];
+        for i in 0..min_len {
+            let d = (got_pcm[i] as i32 - expected_pcm[i] as i32).abs();
+            for slot in 0..5 {
+                if d > top[slot].0 {
+                    for shift in (slot + 1..5).rev() {
+                        top[shift] = top[shift - 1];
+                    }
+                    top[slot] = (d, i);
+                    break;
+                }
+            }
+        }
+        let mut top_csv = String::new();
+        for (d, i) in top {
+            if d == 0 {
+                continue;
+            }
+            if !top_csv.is_empty() {
+                top_csv.push(';');
+            }
+            let packet_idx = packet_end_samples.partition_point(|&end| end <= i);
+            top_csv.push_str(&format!(
+                "{i}:{packet_idx}:{}:{}:{}",
+                expected_pcm[i], got_pcm[i], d
+            ));
+        }
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H28\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:320\",\"message\":\"largest_pcm_deltas\",\"data\":{{\"top_deltas_csv\":\"{}\",\"min_len\":{}}},\"timestamp\":{}}}\n",
+                top_csv,
+                min_len,
+                ts
+            );
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        // #endregion
+    }
+    if let Some(alt_pcm) = &alt_pcm {
+        if *alt_pcm != got_pcm {
+            let min_len = alt_pcm.len().min(got_pcm.len());
+            let first_diff = (0..min_len).find(|&i| alt_pcm[i] != got_pcm[i]);
+            if let Some(sample_idx) = first_diff {
+                let packet_idx = packet_end_samples.partition_point(|&end| end <= sample_idx);
+                let mut diff_csv = String::new();
+                let mut logged = 0usize;
+                for i in sample_idx..min_len {
+                    if alt_pcm[i] != got_pcm[i] {
+                        if !diff_csv.is_empty() {
+                            diff_csv.push(';');
+                        }
+                        let delta = got_pcm[i] as i32 - alt_pcm[i] as i32;
+                        diff_csv.push_str(&format!("{i}:{}:{}:{delta}", alt_pcm[i], got_pcm[i]));
+                        logged += 1;
+                        if logged == 16 {
+                            break;
+                        }
+                    }
+                }
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let line = format!(
+                        "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H27\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:271\",\"message\":\"first_pcm_diff_alt\",\"data\":{{\"sample_idx\":{},\"packet_idx\":{},\"alt\":{},\"got\":{},\"alt_len\":{},\"got_len\":{},\"first_diffs_csv\":\"{}\"}},\"timestamp\":{}}}\n",
+                        sample_idx,
+                        packet_idx,
+                        alt_pcm[sample_idx],
+                        got_pcm[sample_idx],
+                        alt_pcm.len(),
+                        got_pcm.len(),
+                        diff_csv,
+                        ts
+                    );
+                    let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+                }
+                // #endregion
+            }
+        }
+    }
     let q0 = opus_decoder::compare::compare_quality(
         &expected_pcm,
         &got_pcm,

@@ -110,10 +110,6 @@ impl MdctBackward {
                 );
             }
         }
-        for v in out.iter_mut().take(required) {
-            *v = 0.0;
-        }
-
         // Flat interleaved buffer: [re0, im0, re1, im1, ...]
         let mut f2 = vec![0.0f32; n2];
         let t = &self.trig;
@@ -122,8 +118,9 @@ impl MdctBackward {
         for i in 0..n4 {
             let xp1 = input[2 * i];
             let xp2 = input[n2 - 1 - 2 * i];
-            let yr = -xp2 * t[i] + xp1 * t[n4 + i];
-            let yi = xp1 * t[i] + xp2 * t[n4 + i];
+            // Match libopus clt_mdct_backward pre-rotation for float path.
+            let yr = xp2 * t[i] + xp1 * t[n4 + i];
+            let yi = xp1 * t[i] - xp2 * t[n4 + i];
             // Swap slots like libopus FFT-vs-IFFT trick.
             f2[2 * i] = yi;
             f2[2 * i + 1] = yr;

@@ -9,9 +9,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const BITRES: i32 = 3;
 const QTHETA_OFFSET: i32 = 4;
+const QTHETA_OFFSET_TWOPHASE: i32 = 16;
 const SPREAD_AGGRESSIVE: i32 = 3;
 const BIT_INTERLEAVE_TABLE: [u32; 16] = [0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3];
 const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
+const ORDERY_TABLE: [usize; 30] = [
+    1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2,
+    10, 5,
+];
 static TRACE_BANDS_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// CELT linear congruential generator used for folded/noise fill.
@@ -78,6 +83,157 @@ fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
     (ls - lc) * (1 << 11)
         + frac_mul16(isin_n, frac_mul16(isin_n, -2597) + 7932)
         - frac_mul16(icos_n, frac_mul16(icos_n, -2597) + 7932)
+}
+
+/// One-stage Haar transform used by CELT TF reordering.
+///
+/// Params: mutable vector, base size and stride.
+/// Returns: nothing; vector is updated in-place.
+fn haar1(x: &mut [f32], n0: usize, stride: usize) {
+    let half = n0 >> 1;
+    for i in 0..stride {
+        for j in 0..half {
+            let idx0 = stride * 2 * j + i;
+            let idx1 = stride * (2 * j + 1) + i;
+            let tmp1 = std::f32::consts::FRAC_1_SQRT_2 * x[idx0];
+            let tmp2 = std::f32::consts::FRAC_1_SQRT_2 * x[idx1];
+            x[idx0] = tmp1 + tmp2;
+            x[idx1] = tmp1 - tmp2;
+        }
+    }
+}
+
+/// Convert natural to ordery Hadamard index order.
+///
+/// Params: vector, segment size, stride and hadamard mode.
+/// Returns: nothing; vector is updated in-place.
+fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool) {
+    let n = n0 * stride;
+    let mut tmp = vec![0.0f32; n];
+    if hadamard {
+        let ordery = &ORDERY_TABLE[(stride - 2)..];
+        for i in 0..stride {
+            for j in 0..n0 {
+                tmp[ordery[i] * n0 + j] = x[j * stride + i];
+            }
+        }
+    } else {
+        for i in 0..stride {
+            for j in 0..n0 {
+                tmp[i * n0 + j] = x[j * stride + i];
+            }
+        }
+    }
+    x[..n].copy_from_slice(&tmp);
+}
+
+/// Convert ordery Hadamard back to natural order.
+///
+/// Params: vector, segment size, stride and hadamard mode.
+/// Returns: nothing; vector is updated in-place.
+fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool) {
+    let n = n0 * stride;
+    let mut tmp = vec![0.0f32; n];
+    if hadamard {
+        let ordery = &ORDERY_TABLE[(stride - 2)..];
+        for i in 0..stride {
+            for j in 0..n0 {
+                tmp[j * stride + i] = x[ordery[i] * n0 + j];
+            }
+        }
+    } else {
+        for i in 0..stride {
+            for j in 0..n0 {
+                tmp[j * stride + i] = x[i * n0 + j];
+            }
+        }
+    }
+    x[..n].copy_from_slice(&tmp);
+}
+
+/// Apply quant_band decode-time TF/frequency post-processing.
+///
+/// Params: decoded band vector and TF transform context.
+/// Returns: nothing; vector is updated in-place.
+fn apply_quant_band_post_tf(
+    x: &mut [f32],
+    n: usize,
+    b0: usize,
+    recombine: usize,
+    time_divide: usize,
+    long_blocks: bool,
+) {
+    let mut n_b = n / b0.max(1);
+    if b0 > 1 {
+        interleave_hadamard(x, n_b >> recombine, b0 << recombine, long_blocks);
+    }
+    let mut b = b0;
+    for _ in 0..time_divide {
+        b >>= 1;
+        n_b <<= 1;
+        haar1(x, n_b, b);
+    }
+    for k in 0..recombine {
+        haar1(x, n >> k, 1 << k);
+    }
+}
+
+/// Prepare lowband reference for decode-time folding under TF transforms.
+///
+/// Params: lowband slice and TF transform context.
+/// Returns: transformed lowband scratch data.
+fn transform_lowband_for_decode(
+    lowband: &[f32],
+    n: usize,
+    frame_blocks: usize,
+    recombine: usize,
+    tf_change: i32,
+    long_blocks: bool,
+) -> Vec<f32> {
+    if lowband.len() != n {
+        return lowband.to_vec();
+    }
+    let mut out = lowband.to_vec();
+    let mut n_b = n / frame_blocks.max(1);
+    for k in 0..recombine {
+        haar1(&mut out, n >> k, 1 << k);
+    }
+    let mut b = frame_blocks >> recombine;
+    n_b <<= recombine;
+    let mut tf = tf_change;
+    while (n_b & 1) == 0 && tf < 0 {
+        haar1(&mut out, n_b, b);
+        b <<= 1;
+        n_b >>= 1;
+        tf += 1;
+    }
+    if b > 1 {
+        deinterleave_hadamard(&mut out, n_b >> recombine, b << recombine, long_blocks);
+    }
+    out
+}
+
+/// Merge decoded stereo mid/side vectors back to left/right.
+///
+/// Params: mutable left/right vectors and decoded mid gain.
+/// Returns: nothing; vectors are updated in-place.
+fn stereo_merge_float(x: &mut [f32], y: &mut [f32], mid: f32) {
+    let xp = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum::<f32>() * mid;
+    let side = y.iter().map(|v| v * v).sum::<f32>();
+    let el = mid * mid + side - 2.0 * xp;
+    let er = mid * mid + side + 2.0 * xp;
+    if er < 6.0e-4 || el < 6.0e-4 {
+        y.copy_from_slice(x);
+        return;
+    }
+    let lgain = 1.0 / el.sqrt();
+    let rgain = 1.0 / er.sqrt();
+    for i in 0..x.len() {
+        let l = mid * x[i];
+        let r = y[i];
+        x[i] = lgain * (l - r);
+        y[i] = rgain * (l + r);
+    }
 }
 
 /// Compute theta quantization resolution for recursive split.
@@ -159,6 +315,349 @@ fn decode_theta_mono(
     let iside = bitexact_cos(16384 - itheta);
     let delta = frac_mul16((n as i32 - 1) << 7, bitexact_log2tan(iside, imid));
     (delta, qalloc, itheta, imid, iside)
+}
+
+/// Decode stereo theta split and return side allocation context.
+///
+/// Params: mode, band, split size/blocks, bit budget, intensity limit and decoder state.
+/// Returns: `(inv, delta, qalloc, itheta, mid_gain, side_gain)` for stereo split coding.
+#[allow(clippy::too_many_arguments)]
+fn decode_theta_stereo(
+    mode: &CeltMode,
+    band: usize,
+    dec: &mut EcDec<'_>,
+    n: usize,
+    b: &mut i32,
+    blocks: usize,
+    _blocks0: usize,
+    lm: i32,
+    fill: &mut u32,
+    intensity: i32,
+    remaining_bits: i32,
+) -> (bool, i32, i32, i32, f32, f32) {
+    let pulse_cap = mode.log_n[band] as i32 + lm * (1 << BITRES);
+    let offset = (pulse_cap >> 1)
+        - if n == 2 {
+            QTHETA_OFFSET_TWOPHASE
+        } else {
+            QTHETA_OFFSET
+        };
+    let mut qn = compute_qn(n, *b, offset, pulse_cap, true);
+    if band as i32 >= intensity {
+        qn = 1;
+    }
+    let tell_before = dec.tell_frac() as i32;
+    let mut itheta = 0i32;
+    let mut inv = false;
+    if qn != 1 {
+        if n > 2 {
+            let p0 = 3i32;
+            let x0 = qn >> 1;
+            let ft = p0 * (x0 + 1) + x0;
+            let fs = dec.decode(ft as u32) as i32;
+            let x = if fs < (x0 + 1) * p0 {
+                fs / p0
+            } else {
+                x0 + 1 + (fs - (x0 + 1) * p0)
+            };
+            let (fl, fh) = if x <= x0 {
+                (p0 * x, p0 * (x + 1))
+            } else {
+                (
+                    (x - 1 - x0) + (x0 + 1) * p0,
+                    (x - x0) + (x0 + 1) * p0,
+                )
+            };
+            dec.update(fl as u32, fh as u32, ft as u32);
+            itheta = x;
+        } else {
+            itheta = dec.dec_uint((qn + 1) as u32) as i32;
+        }
+        itheta = (itheta * 16384) / qn;
+    } else {
+        if *b > (2 << BITRES) && remaining_bits > (2 << BITRES) {
+            inv = dec.dec_bit_logp(2);
+        }
+        itheta = 0;
+    }
+    let qalloc = dec.tell_frac() as i32 - tell_before;
+    *b -= qalloc;
+    if itheta == 0 {
+        *fill &= (1u32 << blocks) - 1;
+        return (inv, -16384, qalloc, itheta, 1.0, 0.0);
+    }
+    if itheta == 16384 {
+        *fill &= ((1u32 << blocks) - 1) << blocks;
+        return (inv, 16384, qalloc, itheta, 0.0, 1.0);
+    }
+    let imid = bitexact_cos(itheta);
+    let iside = bitexact_cos(16384 - itheta);
+    let delta = frac_mul16((n as i32 - 1) << 7, bitexact_log2tan(iside, imid));
+    (
+        inv,
+        delta,
+        qalloc,
+        itheta,
+        (imid as f32) * (1.0 / 32768.0),
+        (iside as f32) * (1.0 / 32768.0),
+    )
+}
+
+/// Decode one stereo band partition (decode-only path).
+///
+/// Params: stereo vectors, split context, folding source and per-band allocation state.
+/// Returns: collapse mask for this stereo band.
+#[allow(clippy::too_many_arguments)]
+fn quant_band_stereo_decode(
+    mode: &CeltMode,
+    x: &mut [f32],
+    y: &mut [f32],
+    band_idx: usize,
+    mut b: i32,
+    blocks: usize,
+    lowband_x: Option<&[f32]>,
+    lm: i32,
+    mut fill: u32,
+    spread: i32,
+    dec: &mut EcDec<'_>,
+    seed: &mut u32,
+    remaining_bits: &mut i32,
+    intensity: i32,
+    recombine: usize,
+    time_divide: usize,
+    long_blocks: bool,
+    trace_this_packet: bool,
+    packet_idx: usize,
+) -> u32 {
+    let n = x.len();
+    let orig_fill = fill;
+    if n == 1 {
+        let mut decode_sign = |v: &mut f32| {
+            if *remaining_bits >= (1 << BITRES) {
+                let sign = dec.dec_bits(1);
+                *remaining_bits -= 1 << BITRES;
+                *v = if sign != 0 { -1.0 } else { 1.0 };
+            } else {
+                *v = 1.0;
+            }
+        };
+        decode_sign(&mut x[0]);
+        decode_sign(&mut y[0]);
+        return 1;
+    }
+
+    let (inv, delta, qalloc, itheta, mid_gain, side_gain) = decode_theta_stereo(
+        mode,
+        band_idx,
+        dec,
+        n,
+        &mut b,
+        blocks,
+        blocks,
+        lm,
+        &mut fill,
+        intensity,
+        *remaining_bits,
+    );
+    if trace_this_packet && band_idx == 12 {
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H7\",\"location\":\"crates/opus-decoder/src/celt/bands.rs:260\",\"message\":\"stereo_theta_decode\",\"data\":{{\"packet_idx\":{},\"band\":{},\"itheta\":{},\"qalloc\":{},\"delta\":{},\"inv\":{}}},\"timestamp\":{}}}\n",
+                packet_idx, band_idx, itheta, qalloc, delta, inv, ts
+            );
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        // #endregion
+    }
+
+    if n == 2 {
+        let mut mbits = b;
+        let mut sbits = 0;
+        if itheta != 0 && itheta != 16384 {
+            sbits = 1 << BITRES;
+        }
+        mbits -= sbits;
+        *remaining_bits -= qalloc + sbits;
+        let mut sign = 0i32;
+        if sbits != 0 {
+            sign = dec.dec_bits(1) as i32;
+        }
+        let sign = 1 - 2 * sign;
+        if itheta > 8192 {
+            let cm = quant_partition_mono(
+                mode,
+                y,
+                band_idx,
+                mbits,
+                blocks,
+                lowband_x,
+                lm,
+                1.0,
+                orig_fill,
+                spread,
+                dec,
+                seed,
+                remaining_bits,
+                trace_this_packet,
+                packet_idx,
+            );
+            apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
+            x[0] = -(sign as f32) * y[1];
+            x[1] = (sign as f32) * y[0];
+            let xl0 = mid_gain * x[0];
+            let xl1 = mid_gain * x[1];
+            let yr0 = side_gain * y[0];
+            let yr1 = side_gain * y[1];
+            x[0] = xl0 - yr0;
+            y[0] = xl0 + yr0;
+            x[1] = xl1 - yr1;
+            y[1] = xl1 + yr1;
+            if inv {
+                y[0] = -y[0];
+                y[1] = -y[1];
+            }
+            return cm;
+        }
+        let cm = quant_partition_mono(
+            mode,
+            x,
+            band_idx,
+            mbits,
+            blocks,
+            lowband_x,
+            lm,
+            1.0,
+            orig_fill,
+            spread,
+            dec,
+            seed,
+            remaining_bits,
+            trace_this_packet,
+            packet_idx,
+        );
+        apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
+        y[0] = -(sign as f32) * x[1];
+        y[1] = (sign as f32) * x[0];
+        let xl0 = mid_gain * x[0];
+        let xl1 = mid_gain * x[1];
+        let yr0 = side_gain * y[0];
+        let yr1 = side_gain * y[1];
+        x[0] = xl0 - yr0;
+        y[0] = xl0 + yr0;
+        x[1] = xl1 - yr1;
+        y[1] = xl1 + yr1;
+        if inv {
+            y[0] = -y[0];
+            y[1] = -y[1];
+        }
+        return cm;
+    }
+
+    let mut mbits = 0.max(b.min((b - delta) / 2));
+    let mut sbits = b - mbits;
+    *remaining_bits -= qalloc;
+    let mut rebalance = *remaining_bits;
+    let cm = if mbits >= sbits {
+        let mut cm = quant_partition_mono(
+            mode,
+            x,
+            band_idx,
+            mbits,
+            blocks,
+            lowband_x,
+            lm,
+            1.0,
+            fill,
+            spread,
+            dec,
+            seed,
+            remaining_bits,
+            trace_this_packet,
+            packet_idx,
+        );
+        rebalance = mbits - (rebalance - *remaining_bits);
+        if rebalance > (3 << BITRES) && itheta != 0 {
+            sbits += rebalance - (3 << BITRES);
+        }
+        cm |= quant_partition_mono(
+            mode,
+            y,
+            band_idx,
+            sbits,
+            blocks,
+            None,
+            lm,
+            side_gain,
+            fill >> blocks,
+            spread,
+            dec,
+            seed,
+            remaining_bits,
+            trace_this_packet,
+            packet_idx,
+        );
+        apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
+        cm
+    } else {
+        let mut cm = quant_partition_mono(
+            mode,
+            y,
+            band_idx,
+            sbits,
+            blocks,
+            None,
+            lm,
+            side_gain,
+            fill >> blocks,
+            spread,
+            dec,
+            seed,
+            remaining_bits,
+            trace_this_packet,
+            packet_idx,
+        );
+        rebalance = sbits - (rebalance - *remaining_bits);
+        if rebalance > (3 << BITRES) && itheta != 16384 {
+            mbits += rebalance - (3 << BITRES);
+        }
+        cm |= quant_partition_mono(
+            mode,
+            x,
+            band_idx,
+            mbits,
+            blocks,
+            lowband_x,
+            lm,
+            1.0,
+            fill,
+            spread,
+            dec,
+            seed,
+            remaining_bits,
+            trace_this_packet,
+            packet_idx,
+        );
+        apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
+        cm
+    };
+    stereo_merge_float(x, y, mid_gain);
+    if inv {
+        for v in y.iter_mut() {
+            *v = -*v;
+        }
+    }
+    cm
 }
 
 /// Decode one mono partition with recursive split.
@@ -418,6 +917,16 @@ fn quant_partition_mono(
             *v = lb[j % lb.len()] + noise;
         }
         vq::renormalise_vector(x, gain);
+        if blocks < 32 && fill_masked != cm_mask {
+            let n_per_block = n0 / blocks.max(1);
+            for b in 0..blocks {
+                if (fill_masked & (1u32 << b)) == 0 {
+                    let start = b * n_per_block;
+                    let end = (start + n_per_block).min(n0);
+                    x[start..end].fill(0.0);
+                }
+            }
+        }
         return fill_masked;
     }
     for v in x.iter_mut() {
@@ -461,6 +970,7 @@ pub(crate) fn quant_all_bands_mono(
     let mut lowband_offset = 0usize;
     let mut update_lowband = true;
     let norm_offset = m * mode.e_bands[start] as usize;
+    let mut norm_hist = vec![0.0f32; x.len()];
     for i in start..end {
         let tell = dec.tell_frac() as i32;
         if i != start {
@@ -480,10 +990,222 @@ pub(crate) fn quant_all_bands_mono(
             lowband_offset = i;
         }
         let frame_blocks = if short_blocks { m } else { 1 };
+        let long_blocks = frame_blocks == 1;
         let mut b_blocks = frame_blocks;
         let spread_eff = (spread + tf_res[i]).clamp(0, 3);
         let tf_change = tf_res[i];
         let mut n_b = n / b_blocks.max(1);
+        let n_b_initial = n_b;
+        let mut effective_lowband = None::<usize>;
+        let mut x_cm = if b_blocks >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << b_blocks) - 1
+        };
+        if lowband_offset != 0 && (spread != SPREAD_AGGRESSIVE || frame_blocks > 1 || tf_change < 0) {
+            let lowband_start = m * mode.e_bands[lowband_offset] as usize;
+            let effective = lowband_start.saturating_sub(norm_offset + n);
+            let fold_base = effective + norm_offset;
+            let fold_limit = fold_base + n;
+            let mut fold_start = lowband_offset;
+            while fold_start > 0 {
+                fold_start -= 1;
+                if (m * mode.e_bands[fold_start] as usize) <= fold_base {
+                    break;
+                }
+            }
+            let mut fold_end = lowband_offset;
+            while fold_end < i && (m * mode.e_bands[fold_end] as usize) < fold_limit {
+                fold_end += 1;
+            }
+            x_cm = 0;
+            for fold_i in fold_start..fold_end {
+                x_cm |= masks[fold_i] as u32;
+            }
+            effective_lowband = Some(effective);
+        }
+        let mut fill = x_cm;
+        let recombine = tf_change.max(0) as usize;
+        for _ in 0..recombine {
+            let lo = (fill & 0xF) as usize;
+            let hi = ((fill >> 4) & 0xF) as usize;
+            fill = BIT_INTERLEAVE_TABLE[lo] | (BIT_INTERLEAVE_TABLE[hi] << 2);
+        }
+        b_blocks >>= recombine;
+        n_b <<= recombine;
+        let mut tf_for_blocks = tf_change;
+        let mut time_divide = 0usize;
+        while (n_b & 1) == 0 && tf_for_blocks < 0 {
+            if b_blocks < 32 {
+                fill |= fill << b_blocks;
+            } else {
+                fill = u32::MAX;
+            }
+            b_blocks <<= 1;
+            n_b >>= 1;
+            tf_for_blocks += 1;
+            time_divide += 1;
+        }
+        if trace_this_packet {
+            eprintln!(
+                "R pkt{} band {} params: b={} N={} B={} fill=0x{:x} lowband_offset={} update_lowband={} spread_eff={} tf_change={}",
+                packet_idx, i, b, n, b_blocks, fill, lowband_offset, update_lowband, spread_eff, tf_change
+            );
+        }
+        let mut remaining_band_bits = remaining_bits;
+        let lowband_range = effective_lowband.map(|eff| {
+            let src_start = norm_offset + eff;
+            (src_start, src_start + n)
+        });
+        if trace_this_packet {
+            if let Some((src_start, src_end)) = lowband_range {
+                eprintln!(
+                    "R pkt{} band {} fold: lowband_start={} lowband_end={} B={} fill_in=0x{:x}",
+                    packet_idx, i, src_start, src_end, b_blocks, fill
+                );
+            } else {
+                eprintln!(
+                    "R pkt{} band {} fold: lowband_start=-1 lowband_end=-1 B={} fill_in=0x{:x}",
+                    packet_idx, i, b_blocks, fill
+                );
+            }
+        }
+        let (_x_before, x_after) = x.split_at_mut(band_start);
+        let lowband =
+            lowband_range.and_then(|(src_start, src_end)| norm_hist.get(src_start..src_end));
+        let mut lowband_scratch = None;
+        let lowband_for_quant = if let Some(lb) = lowband {
+            if recombine > 0 || ((n_b_initial & 1) == 0 && tf_change < 0) || frame_blocks > 1 {
+                lowband_scratch = Some(transform_lowband_for_decode(
+                    lb,
+                    n,
+                    frame_blocks,
+                    recombine,
+                    tf_change,
+                    long_blocks,
+                ));
+                lowband_scratch.as_deref()
+            } else {
+                Some(lb)
+            }
+        } else {
+            None
+        };
+        let tell_before = dec.tell_frac();
+        let cm = quant_partition_mono(
+            mode,
+            &mut x_after[..n],
+            i,
+            b,
+            b_blocks,
+            lowband_for_quant,
+            lm as i32,
+            1.0,
+            fill,
+            spread_eff,
+            dec,
+            seed,
+            &mut remaining_band_bits,
+            trace_this_packet,
+            packet_idx,
+        );
+        apply_quant_band_post_tf(
+            &mut x_after[..n],
+            n,
+            b_blocks,
+            recombine,
+            time_divide,
+            long_blocks,
+        );
+        if i + 1 < end {
+            let scale = (n as f32).sqrt();
+            for j in 0..n {
+                norm_hist[band_start + j] = x_after[j] * scale;
+            }
+        }
+        let tell_after = dec.tell_frac();
+        if trace_this_packet {
+            eprintln!(
+                "pkt{} band {} tell: {}->{} ({}bits)",
+                packet_idx,
+                i,
+                tell_before,
+                tell_after,
+                tell_after as i32 - tell_before as i32
+            );
+            eprintln!("R pkt{} band {} cm_out=0x{:x}", packet_idx, i, cm);
+        }
+        masks[i] = (cm & 0xFF) as u8;
+        balance += pulses[i] + tell;
+        update_lowband = b > ((n as i32) << BITRES);
+    }
+    masks
+}
+
+/// Decode all CELT bands in stereo decode-only mode.
+///
+/// Params: mode, band range, stereo normalized spectra, allocation/TF flags and coder state.
+/// Returns: collapse mask per channel-band slot (`2 * nb_ebands`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quant_all_bands_stereo(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    x: &mut [f32],
+    y: &mut [f32],
+    pulses: &[i32],
+    short_blocks: bool,
+    spread: i32,
+    tf_res: &[i32],
+    total_bits_q: i32,
+    mut balance: i32,
+    coded_bands: usize,
+    lm: usize,
+    dec: &mut EcDec<'_>,
+    seed: &mut u32,
+    dual_stereo: i32,
+    intensity: i32,
+) -> Vec<u8> {
+    let packet_idx = TRACE_BANDS_CALL_IDX.fetch_add(1, Ordering::SeqCst);
+    let trace_target = std::env::var("OPUS_TRACE_PACKET_IDX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+    let trace_this_packet = trace_target == Some(packet_idx);
+    let m = 1usize << lm;
+    let mut masks = vec![0u8; mode.nb_ebands * 2];
+    let mut lowband_offset = 0usize;
+    let mut update_lowband = true;
+    let norm_offset = m * mode.e_bands[start] as usize;
+    let mut dual_stereo_on = dual_stereo != 0;
+
+    for i in start..end {
+        if dual_stereo_on && i == intensity as usize {
+            dual_stereo_on = false;
+        }
+        let tell = dec.tell_frac() as i32;
+        if i != start {
+            balance -= tell;
+        }
+        let remaining_bits = total_bits_q - tell - 1;
+        let b = if i < coded_bands {
+            let curr_balance = balance / ((coded_bands - i).min(3) as i32);
+            (pulses[i] + curr_balance).clamp(0, 16_383).min(remaining_bits + 1)
+        } else {
+            0
+        };
+        let band_start = m * mode.e_bands[i] as usize;
+        let band_end = m * mode.e_bands[i + 1] as usize;
+        let n = band_end - band_start;
+        if i != start && (update_lowband || lowband_offset == 0) {
+            lowband_offset = i;
+        }
+        let frame_blocks = if short_blocks { m } else { 1 };
+        let long_blocks = frame_blocks == 1;
+        let mut b_blocks = frame_blocks;
+        let spread_eff = (spread + tf_res[i]).clamp(0, 3);
+        let tf_change = tf_res[i];
+        let mut n_b = n / b_blocks.max(1);
+        let n_b_initial = n_b;
         let mut fill = if b_blocks >= 32 {
             u32::MAX
         } else {
@@ -498,6 +1220,7 @@ pub(crate) fn quant_all_bands_mono(
         b_blocks >>= recombine;
         n_b <<= recombine;
         let mut tf_for_blocks = tf_change;
+        let mut time_divide = 0usize;
         while (n_b & 1) == 0 && tf_for_blocks < 0 {
             if b_blocks < 32 {
                 fill |= fill << b_blocks;
@@ -507,14 +1230,8 @@ pub(crate) fn quant_all_bands_mono(
             b_blocks <<= 1;
             n_b >>= 1;
             tf_for_blocks += 1;
+            time_divide += 1;
         }
-        if trace_this_packet {
-            eprintln!(
-                "R pkt{} band {} params: b={} N={} B={} fill=0x{:x} lowband_offset={} update_lowband={} spread_eff={} tf_change={}",
-                packet_idx, i, b, n, b_blocks, fill, lowband_offset, update_lowband, spread_eff, tf_change
-            );
-        }
-        let mut remaining_band_bits = remaining_bits;
         let lowband_range = if lowband_offset != 0
             && (spread != SPREAD_AGGRESSIVE || frame_blocks > 1 || tf_change < 0)
         {
@@ -551,37 +1268,139 @@ pub(crate) fn quant_all_bands_mono(
             None
         };
         let (x_before, x_after) = x.split_at_mut(band_start);
-        let lowband = lowband_range.and_then(|(src_start, src_end)| x_before.get(src_start..src_end));
+        let (y_before, y_after) = y.split_at_mut(band_start);
+        let lowband_x =
+            lowband_range.and_then(|(src_start, src_end)| x_before.get(src_start..src_end));
+        let lowband_y =
+            lowband_range.and_then(|(src_start, src_end)| y_before.get(src_start..src_end));
+        let mut lowband_x_scratch = None;
+        let mut lowband_y_scratch = None;
+        let lowband_x_for_quant = if let Some(lb) = lowband_x {
+            if recombine > 0 || ((n_b_initial & 1) == 0 && tf_change < 0) || frame_blocks > 1 {
+                lowband_x_scratch = Some(transform_lowband_for_decode(
+                    lb,
+                    n,
+                    frame_blocks,
+                    recombine,
+                    tf_change,
+                    long_blocks,
+                ));
+                lowband_x_scratch.as_deref()
+            } else {
+                Some(lb)
+            }
+        } else {
+            None
+        };
+        let lowband_y_for_quant = if let Some(lb) = lowband_y {
+            if recombine > 0 || ((n_b_initial & 1) == 0 && tf_change < 0) || frame_blocks > 1 {
+                lowband_y_scratch = Some(transform_lowband_for_decode(
+                    lb,
+                    n,
+                    frame_blocks,
+                    recombine,
+                    tf_change,
+                    long_blocks,
+                ));
+                lowband_y_scratch.as_deref()
+            } else {
+                Some(lb)
+            }
+        } else {
+            None
+        };
+        let mut remaining_band_bits = remaining_bits;
         let tell_before = dec.tell_frac();
-        let cm = quant_partition_mono(
-            mode,
-            &mut x_after[..n],
-            i,
-            b,
-            b_blocks,
-            lowband,
-            lm as i32,
-            1.0,
-            fill,
-            spread_eff,
-            dec,
-            seed,
-            &mut remaining_band_bits,
-            trace_this_packet,
-            packet_idx,
-        );
+        let cm = if dual_stereo_on {
+            let mut cmx = quant_partition_mono(
+                mode,
+                &mut x_after[..n],
+                i,
+                b / 2,
+                b_blocks,
+                lowband_x_for_quant,
+                lm as i32,
+                1.0,
+                fill,
+                spread_eff,
+                dec,
+                seed,
+                &mut remaining_band_bits,
+                trace_this_packet,
+                packet_idx,
+            );
+            let cmy = quant_partition_mono(
+                mode,
+                &mut y_after[..n],
+                i,
+                b / 2,
+                b_blocks,
+                lowband_y_for_quant,
+                lm as i32,
+                1.0,
+                fill,
+                spread_eff,
+                dec,
+                seed,
+                &mut remaining_band_bits,
+                trace_this_packet,
+                packet_idx,
+            );
+            apply_quant_band_post_tf(
+                &mut x_after[..n],
+                n,
+                b_blocks,
+                recombine,
+                time_divide,
+                long_blocks,
+            );
+            apply_quant_band_post_tf(
+                &mut y_after[..n],
+                n,
+                b_blocks,
+                recombine,
+                time_divide,
+                long_blocks,
+            );
+            cmx |= cmy;
+            cmx
+        } else {
+            quant_band_stereo_decode(
+                mode,
+                &mut x_after[..n],
+                &mut y_after[..n],
+                i,
+                b,
+                b_blocks,
+                lowband_x_for_quant,
+                lm as i32,
+                fill,
+                spread_eff,
+                dec,
+                seed,
+                &mut remaining_band_bits,
+                intensity,
+                recombine,
+                time_divide,
+                long_blocks,
+                trace_this_packet,
+                packet_idx,
+            )
+        };
         let tell_after = dec.tell_frac();
         if trace_this_packet {
             eprintln!(
-                "pkt{} band {} tell: {}->{} ({}bits)",
+                "pkt{} stereo band {} tell: {}->{} ({}bits) dual_stereo={}",
                 packet_idx,
                 i,
                 tell_before,
                 tell_after,
-                tell_after as i32 - tell_before as i32
+                tell_after as i32 - tell_before as i32,
+                dual_stereo_on
             );
         }
-        masks[i] = (cm & 0xFF) as u8;
+        masks[i * 2] = (cm & 0xFF) as u8;
+        masks[i * 2 + 1] = (cm & 0xFF) as u8;
         balance += pulses[i] + tell;
         update_lowband = b > ((n as i32) << BITRES);
     }
