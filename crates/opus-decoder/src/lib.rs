@@ -152,7 +152,12 @@ impl Decoder {
             let frame_samples_48k = pp.samples_per_frame_48k;
             let frame = self
                 .celt
-                .decode_frame(frame, frame_samples_48k, &mut out[written_per_channel * self.channels as usize..])?;
+                .decode_frame(
+                    frame,
+                    frame_samples_48k,
+                    config,
+                    &mut out[written_per_channel * self.channels as usize..],
+                )?;
             self.last_packet_split_count += self.celt.last_split_count();
             self.last_packet_is_transient = frame.is_transient;
             written_per_channel += frame.samples_per_channel;

@@ -28,8 +28,8 @@ pub(crate) fn get_pulses(i: i32) -> i32 {
 ///
 /// Params: `mode` CELT mode, `band` index, `lm` frame size log2, `bits` in BITRES units.
 /// Returns: pseudo pulse index used by `get_pulses`.
-pub(crate) fn bits2pulses(mode: &CeltMode, band: usize, lm: usize, bits: i32) -> i32 {
-    let lm1 = lm + 1;
+pub(crate) fn bits2pulses(mode: &CeltMode, band: usize, lm: i32, bits: i32) -> i32 {
+    let lm1 = (lm + 1).max(0) as usize;
     let cache_base = mode.cache.index[lm1 * mode.nb_ebands + band] as usize;
     let cache = &mode.cache.bits[cache_base..];
     let mut lo = 0i32;
@@ -55,11 +55,11 @@ pub(crate) fn bits2pulses(mode: &CeltMode, band: usize, lm: usize, bits: i32) ->
 ///
 /// Params: `mode` CELT mode, `band` index, `lm` frame size log2, `pulses` pseudo pulse index.
 /// Returns: number of bits in BITRES units spent by this pulse count.
-pub(crate) fn pulses2bits(mode: &CeltMode, band: usize, lm: usize, pulses: i32) -> i32 {
+pub(crate) fn pulses2bits(mode: &CeltMode, band: usize, lm: i32, pulses: i32) -> i32 {
     if pulses == 0 {
         return 0;
     }
-    let lm1 = lm + 1;
+    let lm1 = (lm + 1).max(0) as usize;
     let cache_base = mode.cache.index[lm1 * mode.nb_ebands + band] as usize;
     let cache = &mode.cache.bits[cache_base..];
     cache[pulses as usize] as i32 + 1
@@ -378,12 +378,14 @@ fn interp_bits2pulses(
     }
 
     let mut balance = 0i32;
+    let stereo_shift = if stereo { 1 } else { 0 };
     for j in start..coded_bands {
         let n0 = (mode.e_bands[j + 1] - mode.e_bands[j]) as i32;
         let n = n0 << lm;
         let bit = bits[j] + balance;
+        let mut excess;
         if n > 1 {
-            let excess = (bit - cap[j]).max(0);
+            excess = (bit - cap[j]).max(0);
             bits[j] = bit - excess;
             let den = c * n + if channels == 2 && n > 2 && *dual_stereo == 0 && j < *intensity as usize { 1 } else { 0 };
             let nclogn = den * (mode.log_n[j] as i32 + log_m);
@@ -398,21 +400,27 @@ fn interp_bits2pulses(
             }
             let mut e = (bits[j] + offset + (den << (BITRES - 1))).max(0);
             e = (e / den) >> BITRES;
-            if c * e > (bits[j] >> if stereo { 1 } else { 0 }) {
-                e = bits[j] >> if stereo { 1 } else { 0 } >> BITRES;
+            if c * e > (bits[j] >> stereo_shift) {
+                e = (bits[j] >> stereo_shift) >> BITRES;
             }
             e = e.min(MAX_FINE_BITS);
             ebits[j] = e;
             fine_priority[j] = i32::from(ebits[j] * (den << BITRES) >= bits[j] + offset);
             bits[j] -= c * ebits[j] << BITRES;
-            balance = excess;
         } else {
-            let excess = (bit - (c << BITRES)).max(0);
+            excess = (bit - (c << BITRES)).max(0);
             bits[j] = bit - excess;
             ebits[j] = 0;
             fine_priority[j] = 1;
-            balance = excess;
         }
+        if excess > 0 {
+            let extra_fine = ((excess >> (stereo_shift + BITRES)).max(0)).min(MAX_FINE_BITS - ebits[j]);
+            ebits[j] += extra_fine;
+            let extra_bits = (extra_fine * c) << BITRES;
+            fine_priority[j] = i32::from(extra_bits >= excess - balance);
+            excess -= extra_bits;
+        }
+        balance = excess;
     }
     for j in coded_bands..end {
         ebits[j] = bits[j] >> if stereo { 1 } else { 0 } >> BITRES;

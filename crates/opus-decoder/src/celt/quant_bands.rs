@@ -15,6 +15,7 @@ const BETA_COEF: [f32; 4] = [30147.0 / 32768.0, 22282.0 / 32768.0, 12124.0 / 327
 const BETA_INTRA: f32 = 4915.0 / 32768.0;
 const SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
 static TRACE_COARSE_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
+static TRACE_FINE_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 static TRACE_FINALISE_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 const E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
@@ -80,6 +81,14 @@ pub(crate) fn unquant_coarse_energy(
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
     let coarse_call_idx = TRACE_COARSE_CALL_IDX.fetch_add(1, Ordering::SeqCst);
+    let trace_this_call = target_idx == Some(coarse_call_idx);
+    if trace_this_call {
+        eprintln!(
+            "R coarse_call_idx={} start tell_frac={}",
+            coarse_call_idx,
+            dec.tell_frac()
+        );
+    }
     let prob_model = &E_PROB_MODEL[lm][usize::from(intra)];
     let mut prev = [0.0f32; 2];
     let (coef, beta) = if intra { (0.0, BETA_INTRA) } else { (PRED_COEF[lm], BETA_COEF[lm]) };
@@ -100,6 +109,16 @@ pub(crate) fn unquant_coarse_energy(
             } else {
                 -1
             };
+            if trace_this_call {
+                eprintln!(
+                    "R pkt{} coarse band={} c={} qi={} tell_frac={}",
+                    coarse_call_idx,
+                    i,
+                    c,
+                    qi,
+                    dec.tell_frac()
+                );
+            }
             let q = qi as f32;
             let idx = i + c * mode.nb_ebands;
             old_ebands[idx] = old_ebands[idx].max(-9.0);
@@ -130,15 +149,30 @@ pub(crate) fn unquant_fine_energy(
     dec: &mut EcDec<'_>,
     channels: usize,
 ) {
+    let target_idx = std::env::var("OPUS_TRACE_PACKET_IDX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+    let fine_call_idx = TRACE_FINE_CALL_IDX.fetch_add(1, Ordering::SeqCst);
     for i in start..end {
         let extra = extra_quant[i];
         if extra <= 0 {
             continue;
         }
+        let tell_before_band = dec.tell_frac();
         for c in 0..channels {
             let q2 = dec.dec_bits(extra as u32) as f32;
             let offset = (q2 + 0.5) * ((1u32 << (14 - extra as u32)) as f32) * (1.0 / 16384.0) - 0.5;
             old_ebands[i + c * mode.nb_ebands] += offset;
+        }
+        if target_idx == Some(fine_call_idx) {
+            eprintln!(
+                "R pkt{} fine band={} extra={} tell:{}->{}",
+                fine_call_idx,
+                i,
+                extra,
+                tell_before_band,
+                dec.tell_frac()
+            );
         }
     }
 }

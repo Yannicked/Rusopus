@@ -9,6 +9,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const BITRES: i32 = 3;
 const QTHETA_OFFSET: i32 = 4;
+const SPREAD_AGGRESSIVE: i32 = 3;
+const BIT_INTERLEAVE_TABLE: [u32; 16] = [0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3];
 const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
 static TRACE_BANDS_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
@@ -140,7 +142,7 @@ fn decode_theta_mono(
             dec.update(fl as u32, (fl + fs) as u32, ft as u32);
             itheta = ith;
         }
-        itheta = (itheta * 16384 + (qn >> 1)) / qn;
+        itheta = (itheta * 16384) / qn;
     }
     let qalloc = dec.tell_frac() as i32 - tell_before;
     *b -= qalloc;
@@ -178,9 +180,46 @@ fn quant_partition_mono(
     dec: &mut EcDec<'_>,
     seed: &mut u32,
     remaining_bits: &mut i32,
+    trace_this_packet: bool,
+    packet_idx: usize,
 ) -> u32 {
     let n0 = x.len();
     let blocks0 = blocks;
+    if n0 == 1 {
+        if *remaining_bits >= (1 << BITRES) {
+            let sign = dec.dec_bits(1);
+            *remaining_bits -= 1 << BITRES;
+            x[0] = if sign != 0 { -1.0 } else { 1.0 };
+        } else {
+            x[0] = 1.0;
+        }
+        if trace_this_packet && band_idx == 0 {
+            // #region agent log
+            eprintln!(
+                "R pkt{} qpart n1: rem_bits={} tell={} x0={}",
+                packet_idx,
+                *remaining_bits,
+                dec.tell_frac(),
+                x[0]
+            );
+            // #endregion
+        }
+        return 1;
+    }
+    if trace_this_packet && band_idx == 12 {
+        // #region agent log
+        eprintln!(
+            "R pkt{} qpart enter: N={} b={} B={} lm={} rem_bits={} tell={}",
+            packet_idx,
+            n0,
+            b,
+            blocks,
+            lm,
+            *remaining_bits,
+            dec.tell_frac()
+        );
+        // #endregion
+    }
     let cache_row = ((lm + 1) as usize)
         .saturating_mul(mode.nb_ebands)
         .saturating_add(band_idx);
@@ -218,6 +257,23 @@ fn quant_partition_mono(
         let mut mbits = 0.max(b.min((b - delta) / 2));
         let mut sbits = b - mbits;
         *remaining_bits -= qalloc;
+        if trace_this_packet && band_idx == 12 {
+            // #region agent log
+            eprintln!(
+                "R pkt{} qpart split: N={} n={} qalloc={} itheta={} delta={} mbits={} sbits={} rem_bits={} tell={}",
+                packet_idx,
+                n0,
+                n,
+                qalloc,
+                itheta,
+                delta,
+                mbits,
+                sbits,
+                *remaining_bits,
+                dec.tell_frac()
+            );
+            // #endregion
+        }
         let next_lowband2 = lowband.map(|lb| {
             if lb.len() > n {
                 &lb[n..]
@@ -241,6 +297,8 @@ fn quant_partition_mono(
                 dec,
                 seed,
                 remaining_bits,
+                trace_this_packet,
+                packet_idx,
             );
             rebalance = mbits - (rebalance - *remaining_bits);
             if rebalance > (3 << BITRES) && itheta != 0 {
@@ -260,6 +318,8 @@ fn quant_partition_mono(
                 dec,
                 seed,
                 remaining_bits,
+                trace_this_packet,
+                packet_idx,
             ) << (blocks0 >> 1);
             return cm;
         }
@@ -278,6 +338,8 @@ fn quant_partition_mono(
             dec,
             seed,
             remaining_bits,
+            trace_this_packet,
+            packet_idx,
         ) << (blocks0 >> 1);
         rebalance = sbits - (rebalance - *remaining_bits);
         if rebalance > (3 << BITRES) && itheta != 16384 {
@@ -297,19 +359,34 @@ fn quant_partition_mono(
             dec,
             seed,
             remaining_bits,
+            trace_this_packet,
+            packet_idx,
         );
         return cm;
     }
 
-    let lm_nonneg = lm.max(0) as usize;
-    let mut q = rate::bits2pulses(mode, band_idx, lm_nonneg, b.max(0));
-    let mut curr_bits = rate::pulses2bits(mode, band_idx, lm_nonneg, q);
+    let mut q = rate::bits2pulses(mode, band_idx, lm, b.max(0));
+    let mut curr_bits = rate::pulses2bits(mode, band_idx, lm, q);
     *remaining_bits -= curr_bits;
     while *remaining_bits < 0 && q > 0 {
         *remaining_bits += curr_bits;
         q -= 1;
-        curr_bits = rate::pulses2bits(mode, band_idx, lm_nonneg, q);
+        curr_bits = rate::pulses2bits(mode, band_idx, lm, q);
         *remaining_bits -= curr_bits;
+    }
+    if trace_this_packet && band_idx == 12 {
+        // #region agent log
+        eprintln!(
+            "R pkt{} qpart nosplit: N={} b={} q={} curr_bits={} rem_bits={} tell={}",
+            packet_idx,
+            n0,
+            b,
+            q,
+            curr_bits,
+            *remaining_bits,
+            dec.tell_frac()
+        );
+        // #endregion
     }
     if q != 0 {
         let k = rate::get_pulses(q);
@@ -399,34 +476,86 @@ pub(crate) fn quant_all_bands_mono(
         let band_start = m * mode.e_bands[i] as usize;
         let band_end = m * mode.e_bands[i + 1] as usize;
         let n = band_end - band_start;
-        if (band_start >= norm_offset + n || i == start + 1) && (update_lowband || lowband_offset == 0) {
+        if i != start && (update_lowband || lowband_offset == 0) {
             lowband_offset = i;
         }
-        let b_blocks = if short_blocks { m } else { 1 };
+        let frame_blocks = if short_blocks { m } else { 1 };
+        let mut b_blocks = frame_blocks;
         let spread_eff = (spread + tf_res[i]).clamp(0, 3);
-        let mut remaining_band_bits = remaining_bits;
-        let fill = if b_blocks >= 32 {
+        let tf_change = tf_res[i];
+        let mut n_b = n / b_blocks.max(1);
+        let mut fill = if b_blocks >= 32 {
             u32::MAX
         } else {
             (1u32 << b_blocks) - 1
         };
-        let lowband_buf = if i == 0 {
-            None
-        } else {
-            let src = lowband_offset.min(i - 1);
-            let src_start = m * mode.e_bands[src] as usize;
-            let src_end = m * mode.e_bands[src + 1] as usize;
-            if src_end <= band_start && src_end > src_start {
-                Some(x[src_start..src_end].to_vec())
+        let recombine = tf_change.max(0) as usize;
+        for _ in 0..recombine {
+            let lo = (fill & 0xF) as usize;
+            let hi = ((fill >> 4) & 0xF) as usize;
+            fill = BIT_INTERLEAVE_TABLE[lo] | (BIT_INTERLEAVE_TABLE[hi] << 2);
+        }
+        b_blocks >>= recombine;
+        n_b <<= recombine;
+        let mut tf_for_blocks = tf_change;
+        while (n_b & 1) == 0 && tf_for_blocks < 0 {
+            if b_blocks < 32 {
+                fill |= fill << b_blocks;
+            } else {
+                fill = u32::MAX;
+            }
+            b_blocks <<= 1;
+            n_b >>= 1;
+            tf_for_blocks += 1;
+        }
+        if trace_this_packet {
+            eprintln!(
+                "R pkt{} band {} params: b={} N={} B={} fill=0x{:x} lowband_offset={} update_lowband={} spread_eff={} tf_change={}",
+                packet_idx, i, b, n, b_blocks, fill, lowband_offset, update_lowband, spread_eff, tf_change
+            );
+        }
+        let mut remaining_band_bits = remaining_bits;
+        let lowband_range = if lowband_offset != 0
+            && (spread != SPREAD_AGGRESSIVE || frame_blocks > 1 || tf_change < 0)
+        {
+            let lowband_start = m * mode.e_bands[lowband_offset] as usize;
+            let effective_lowband = lowband_start.saturating_sub(norm_offset + n);
+            let fold_low = effective_lowband + norm_offset;
+            let fold_high = fold_low + n;
+
+            let mut fold_start = lowband_offset;
+            while fold_start > 0 && m * mode.e_bands[fold_start - 1] as usize > fold_low {
+                fold_start -= 1;
+            }
+
+            let mut fold_end = lowband_offset.saturating_sub(1);
+            while fold_end + 1 < i && m * (mode.e_bands[fold_end + 1] as usize) < fold_high {
+                fold_end += 1;
+            }
+
+            if fold_end >= fold_start {
+                let fold_count = fold_end - fold_start + 1;
+                let fold_pos = (i - 1).saturating_sub(fold_start);
+                let src = fold_start + (fold_pos % fold_count);
+                let src_start = m * mode.e_bands[src] as usize;
+                let src_end = m * mode.e_bands[src + 1] as usize;
+                if src_end <= band_start && src_end > src_start {
+                    Some((src_start, src_end))
+                } else {
+                    None
+                }
             } else {
                 None
             }
+        } else {
+            None
         };
-        let lowband = lowband_buf.as_deref();
+        let (x_before, x_after) = x.split_at_mut(band_start);
+        let lowband = lowband_range.and_then(|(src_start, src_end)| x_before.get(src_start..src_end));
         let tell_before = dec.tell_frac();
         let cm = quant_partition_mono(
             mode,
-            &mut x[band_start..band_end],
+            &mut x_after[..n],
             i,
             b,
             b_blocks,
@@ -438,6 +567,8 @@ pub(crate) fn quant_all_bands_mono(
             dec,
             seed,
             &mut remaining_band_bits,
+            trace_this_packet,
+            packet_idx,
         );
         let tell_after = dec.tell_frac();
         if trace_this_packet {
