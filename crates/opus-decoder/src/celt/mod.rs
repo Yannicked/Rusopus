@@ -18,7 +18,6 @@ mod bands;
 
 const OVERLAP_48K_20MS: usize = 120;
 const NBANDS_48K_20MS: usize = 21;
-const CELT_DEEMPH_COEFF: f32 = 0.85000610;
 const LOG_ENERGY_FLOOR_DB: f32 = -28.0;
 const BITRES: i32 = 3;
 const COMBFILTER_MINPERIOD: usize = 15;
@@ -37,6 +36,8 @@ const TF_SELECT_TABLE: [[i8; 8]; 4] = [
     [0, -2, 0, -3, 2, 0, 1, -1],
     [0, -2, 0, -3, 3, 0, 1, -1],
 ];
+const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log";
+const DEBUG_SESSION_ID: &str = "4200c5";
 static TRACE_PACKET_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// Result of decoding one CELT frame.
@@ -169,16 +170,119 @@ impl CeltDecoder {
         self.last_is_transient
     }
 
+    /// Check whether packet should emit targeted debug logs.
+    ///
+    /// Params: `packet_idx` absolute packet index in current test run.
+    /// Returns: true when packet is in onset/hotspot probe set.
+    fn should_trace_debug_packet(packet_idx: usize) -> bool {
+        packet_idx <= 12
+            || matches!(
+                packet_idx,
+                138
+                    | 160
+                    | 162
+                    | 499
+                    | 605
+                    | 611
+                    | 905
+                    | 906
+                    | 907
+                    | 2272
+                    | 2273
+                    | 2274
+                    | 2275
+                    | 2276
+                    | 2364
+                    | 2367
+                    | 2371
+                    | 2534
+                    | 2686
+                    | 2687
+                    | 2688
+                    | 2689
+                    | 2690
+                    | 2691
+                    | 2693
+                    | 2756
+                    | 2757
+                    | 2758
+                    | 2759
+                    | 2760
+                    | 2761
+                    | 2764
+                    | 2765
+                    | 2766
+                    | 2767
+                    | 2805
+                    | 3226
+                    | 3277
+                    | 3350
+                    | 3353
+                    | 3363
+                    | 3364
+                    | 3375
+                    | 3536
+                    | 3541
+                    | 3547
+                    | 3568
+                    | 3569
+                    | 3573
+                    | 3893
+                    | 3903
+                    | 3978
+                    | 3979
+                    | 3980
+                    | 3986
+                    | 3987
+                    | 3992
+                    | 3993
+                    | 3998
+                    | 3999
+            )
+    }
+
+    /// Append one NDJSON debug entry to the session log.
+    ///
+    /// Params: `run_id` run label, `hypothesis_id` tested hypothesis, `location`
+    /// source marker, `message` event name, and `data_json` object string.
+    /// Returns: nothing.
+    fn append_debug_log(
+        run_id: &str,
+        hypothesis_id: &str,
+        location: &str,
+        message: &str,
+        data_json: &str,
+    ) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(DEBUG_LOG_PATH)
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+                DEBUG_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
+            );
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+    }
+
     /// Apply first-order deemphasis to one channel buffer in-place.
     ///
     /// Params: `ch` is channel index, `samples` are per-channel samples.
     /// Returns: nothing.
     fn apply_deemph(&mut self, ch: usize, samples: &mut [f32]) {
+        let coef = self.mode.preemph[0];
         let mut mem = self.deemph_mem[ch];
         for x in samples.iter_mut() {
-            let y = *x + CELT_DEEMPH_COEFF * mem;
-            mem = y;
-            *x = y;
+            // libopus recurrence:
+            // tmp = x + m; m = coef * tmp; output = tmp
+            let tmp = *x + mem;
+            mem = coef * tmp;
+            *x = tmp;
         }
         self.deemph_mem[ch] = mem;
     }
@@ -300,7 +404,35 @@ impl CeltDecoder {
             .ok()
             .and_then(|v| v.parse::<usize>().ok());
         let trace_this_packet = trace_packet_idx == Some(packet_idx);
+        let debug_packet = Self::should_trace_debug_packet(packet_idx);
         let coded_channels = packet_channels.clamp(1, 2) as usize;
+        if debug_packet {
+            let overlap_abs: f32 = self.overlap.iter().map(|x| x.abs()).sum();
+            let data = format!(
+                "{{\"packet_idx\":{},\"frame_size_48k\":{},\"config\":{},\"coded_channels\":{},\"overlap_abs_in\":{},\"deemph_mem0_in\":{},\"pf_old_period\":{},\"pf_old_gain\":{},\"pf_old_tapset\":{},\"pf_cur_period\":{},\"pf_cur_gain\":{},\"pf_cur_tapset\":{}}}",
+                packet_idx,
+                frame_size_48k,
+                config,
+                coded_channels,
+                overlap_abs,
+                self.deemph_mem[0],
+                self.postfilter_period_old,
+                self.postfilter_gain_old,
+                self.postfilter_tapset_old,
+                self.postfilter_period,
+                self.postfilter_gain,
+                self.postfilter_tapset
+            );
+            // #region agent log
+            Self::append_debug_log(
+                "run-onset-map-v1",
+                "H1",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "state_in",
+                &data,
+            );
+            // #endregion
+        }
         if coded_channels == 1 {
             let nb = self.mode.nb_ebands;
             for i in 0..nb {
@@ -358,6 +490,16 @@ impl CeltDecoder {
                 postfilter_tapset = ec.dec_icdf(&TAPSET_ICDF, 2) as i32;
             }
             postfilter_gain = 0.09375 * (postfilter_qg + 1) as f32;
+        }
+        if trace_this_packet {
+            eprintln!(
+                "R pkt{} postfilter_active={} pitch={} qg={} tapset={}",
+                packet_idx,
+                postfilter_pitch > 0,
+                postfilter_pitch,
+                postfilter_qg,
+                postfilter_tapset
+            );
         }
         // #region agent log
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -417,6 +559,12 @@ impl CeltDecoder {
         } else {
             false
         };
+        if packet_idx == 905 {
+            eprintln!(
+                "R pkt905 frame_size_48k={} lm={} is_transient={}",
+                frame_size_48k, lm, is_transient
+            );
+        }
         if trace_this_packet {
             eprintln!("R pkt{} [after_transient] tell={}", packet_idx, ec.tell_frac());
         }
@@ -554,11 +702,53 @@ impl CeltDecoder {
         } else {
             0
         };
-        if packet_idx < 5 {
+        if packet_idx < 5 || trace_this_packet {
             eprintln!(
                 "pkt{} is_transient={} anti_collapse_rsv={}",
                 packet_idx, is_transient, anti_collapse_rsv
             );
+        }
+        if (4..=8).contains(&packet_idx) {
+            let overlap_abs: f32 = self.overlap.iter().map(|x| x.abs()).sum();
+            let deemph = self.deemph_mem[0];
+            eprintln!(
+                "R pkt{} STATE_IN overlap_abs={:.4} deemph={:.6} frame_size={} config={} end={} is_transient={} lm={} postfilter_pitch={} anti_collapse_rsv={}",
+                packet_idx,
+                overlap_abs,
+                deemph,
+                frame_size_48k,
+                config,
+                end,
+                is_transient,
+                lm,
+                postfilter_pitch,
+                anti_collapse_rsv
+            );
+        }
+        if debug_packet || intra_ener {
+            let data = format!(
+                "{{\"packet_idx\":{},\"config\":{},\"end\":{},\"lm\":{},\"is_transient\":{},\"intra_ener\":{},\"postfilter_active\":{},\"postfilter_pitch\":{},\"postfilter_qg\":{},\"postfilter_tapset\":{},\"anti_collapse_rsv\":{}}}",
+                packet_idx,
+                config,
+                end,
+                lm,
+                is_transient,
+                intra_ener,
+                postfilter_pitch > 0,
+                postfilter_pitch,
+                postfilter_qg,
+                postfilter_tapset,
+                anti_collapse_rsv
+            );
+            // #region agent log
+            Self::append_debug_log(
+                "run-onset-map-v1",
+                "H4",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "packet_flags",
+                &data,
+            );
+            // #endregion
         }
         bits -= anti_collapse_rsv;
         let alloc = rate::clt_compute_allocation(
@@ -880,9 +1070,66 @@ impl CeltDecoder {
             }
             // #endregion
         }
-        // Anti-collapse bit (consumed from range coder for transient frames)
+        // Anti-collapse bit (consumed from range coder for transient frames).
         if anti_collapse_rsv > 0 {
-            let _anti_collapse_on = ec.dec_bits(1);
+            let anti_collapse_on = ec.dec_bits(1);
+            if trace_this_packet
+                || std::env::var("OPUS_TRACE_ANTI_COLLAPSE").ok().as_deref() == Some("1")
+            {
+                eprintln!(
+                    "pkt{} anti_collapse_rsv={} anti_collapse_on={} is_transient={} lm={}",
+                    packet_idx, anti_collapse_rsv, anti_collapse_on, is_transient, lm
+                );
+            }
+            if debug_packet {
+                let data = format!(
+                    "{{\"packet_idx\":{},\"anti_collapse_rsv\":{},\"anti_collapse_on\":{},\"is_transient\":{},\"lm\":{}}}",
+                    packet_idx, anti_collapse_rsv, anti_collapse_on, is_transient, lm
+                );
+                // #region agent log
+                Self::append_debug_log(
+                    "run-onset-map-v1",
+                    "H5",
+                    "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                    "anti_collapse_flag",
+                    &data,
+                );
+                // #endregion
+            }
+        } else if trace_this_packet {
+            eprintln!(
+                "pkt{} anti_collapse_rsv=0 anti_collapse_on=0 is_transient={} lm={}",
+                packet_idx, is_transient, lm
+            );
+            if debug_packet {
+                let data = format!(
+                    "{{\"packet_idx\":{},\"anti_collapse_rsv\":0,\"anti_collapse_on\":0,\"is_transient\":{},\"lm\":{}}}",
+                    packet_idx, is_transient, lm
+                );
+                // #region agent log
+                Self::append_debug_log(
+                    "run-onset-map-v1",
+                    "H5",
+                    "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                    "anti_collapse_flag",
+                    &data,
+                );
+                // #endregion
+            }
+        } else if debug_packet {
+            let data = format!(
+                "{{\"packet_idx\":{},\"anti_collapse_rsv\":0,\"anti_collapse_on\":0,\"is_transient\":{},\"lm\":{}}}",
+                packet_idx, is_transient, lm
+            );
+            // #region agent log
+            Self::append_debug_log(
+                "run-onset-map-v1",
+                "H5",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "anti_collapse_flag",
+                &data,
+            );
+            // #endregion
         }
         quant_bands::unquant_energy_finalise(
             self.mode,
@@ -905,6 +1152,29 @@ impl CeltDecoder {
             end,
             lm,
         );
+        if packet_idx == 905 {
+            let denorm_abs_sum: f32 = denorm.iter().map(|x| x.abs()).sum();
+            let first_n = denorm.len().min(16);
+            eprintln!(
+                "R pkt905 denorm abs_sum={:.6} first{}={:?}",
+                denorm_abs_sum,
+                first_n,
+                &denorm[..first_n]
+            );
+            let m = 1usize << lm;
+            for i in 0..end {
+                let bs = m * self.mode.e_bands[i] as usize;
+                let be = m * self.mode.e_bands[i + 1] as usize;
+                let band_abs: f32 = denorm[bs..be].iter().map(|x| x.abs()).sum();
+                eprintln!("R pkt905 denorm band {} abs_sum={:.6}", i, band_abs);
+            }
+            let active_end = m * self.mode.e_bands[end] as usize;
+            let beyond_end_abs: f32 = denorm[active_end..].iter().map(|x| x.abs()).sum();
+            eprintln!(
+                "R pkt905 denorm beyond_end abs_sum={:.6} active_end={}",
+                beyond_end_abs, active_end
+            );
+        }
         if coded_channels == 2 && self.channels == 1 {
             if let Some(side) = mdct_side.as_ref() {
                 let mut denorm_side = vec![0.0f32; frame_size_48k];
@@ -917,17 +1187,50 @@ impl CeltDecoder {
                     end,
                     lm,
                 );
+                let sum_l_before: f32 = denorm.iter().map(|x| x.abs()).sum();
+                let sum_r_before: f32 = denorm_side.iter().map(|x| x.abs()).sum();
                 if packet_idx == 2135 {
-                    let sum_l: f32 = denorm.iter().map(|x| x.abs()).sum();
-                    let sum_r: f32 = denorm_side.iter().map(|x| x.abs()).sum();
-                    eprintln!("R pkt2135 denorm abs_sum: L={:.6} R={:.6}", sum_l, sum_r);
+                    eprintln!(
+                        "R pkt2135 denorm abs_sum: L={:.6} R={:.6}",
+                        sum_l_before, sum_r_before
+                    );
+                }
+                if debug_packet {
+                    let data = format!(
+                        "{{\"packet_idx\":{},\"sum_l_before\":{},\"sum_r_before\":{},\"frame_size_48k\":{},\"lm\":{}}}",
+                        packet_idx, sum_l_before, sum_r_before, frame_size_48k, lm
+                    );
+                    // #region agent log
+                    Self::append_debug_log(
+                        "run-onset-map-v1",
+                        "H2",
+                        "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                        "stereo_denorm_before_downmix",
+                        &data,
+                    );
+                    // #endregion
                 }
                 for i in 0..frame_size_48k {
                     denorm[i] = 0.5 * (denorm[i] + denorm_side[i]);
                 }
+                let sum_mono_after: f32 = denorm.iter().map(|x| x.abs()).sum();
                 if packet_idx == 2135 {
-                    let sum_mono: f32 = denorm.iter().map(|x| x.abs()).sum();
-                    eprintln!("R pkt2135 mono abs_sum after downmix: {:.6}", sum_mono);
+                    eprintln!("R pkt2135 mono abs_sum after downmix: {:.6}", sum_mono_after);
+                }
+                if debug_packet {
+                    let data = format!(
+                        "{{\"packet_idx\":{},\"sum_mono_after\":{},\"frame_size_48k\":{},\"lm\":{}}}",
+                        packet_idx, sum_mono_after, frame_size_48k, lm
+                    );
+                    // #region agent log
+                    Self::append_debug_log(
+                        "run-onset-map-v1",
+                        "H2",
+                        "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                        "stereo_denorm_after_downmix",
+                        &data,
+                    );
+                    // #endregion
                 }
             }
         }
@@ -1202,6 +1505,40 @@ impl CeltDecoder {
             }
             // #endregion
         }
+        if packet_idx == 905 {
+            let post_imdct_abs: f32 = base_synth.iter().map(|x| x.abs()).sum();
+            let first_n = base_synth.len().min(8);
+            eprintln!(
+                "R pkt905 post_imdct abs_sum={:.6} first{}={:?}",
+                post_imdct_abs,
+                first_n,
+                &base_synth[..first_n]
+            );
+        }
+        if debug_packet {
+            let post_imdct_abs: f32 = base_synth.iter().map(|x| x.abs()).sum();
+            let overlap_abs_out: f32 = self.overlap.iter().map(|x| x.abs()).sum();
+            let mut first8_csv = String::new();
+            for x in base_synth.iter().take(8) {
+                if !first8_csv.is_empty() {
+                    first8_csv.push(';');
+                }
+                first8_csv.push_str(&format!("{:.6}", x));
+            }
+            let data = format!(
+                "{{\"packet_idx\":{},\"is_transient\":{},\"lm\":{},\"post_imdct_abs\":{},\"overlap_abs_out\":{},\"base_first8_csv\":\"{}\"}}",
+                packet_idx, is_transient, lm, post_imdct_abs, overlap_abs_out, first8_csv
+            );
+            // #region agent log
+            Self::append_debug_log(
+                "run-onset-map-v1",
+                "H2",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "post_imdct_overlap_out",
+                &data,
+            );
+            // #endregion
+        }
 
         let decode_len = DECODE_BUFFER_SIZE + self.mode.overlap;
         self.decode_mem.copy_within(frame_size_48k..decode_len, 0);
@@ -1266,33 +1603,39 @@ impl CeltDecoder {
         let pf_period_old = self.postfilter_period_old.max(COMBFILTER_MINPERIOD as i32) as usize;
         let decoded_tapset = postfilter_tapset.clamp(0, 2) as usize;
         let short_n = self.mode.short_mdct_size.min(frame_size_48k);
-        Self::comb_filter_in_place(
-            &mut self.decode_mem,
-            out_start,
-            pf_period_old,
-            pf_period,
-            short_n,
-            self.postfilter_gain_old,
-            self.postfilter_gain,
-            self.postfilter_tapset_old,
-            self.postfilter_tapset,
-            self.mode.window,
-            self.mode.overlap,
-        );
-        if lm != 0 && frame_size_48k > short_n {
+        let disable_comb_filter = std::env::var("OPUS_DISABLE_COMB_FILTER")
+            .ok()
+            .as_deref()
+            == Some("1");
+        if !disable_comb_filter {
             Self::comb_filter_in_place(
                 &mut self.decode_mem,
-                out_start + short_n,
+                out_start,
+                pf_period_old,
                 pf_period,
-                postfilter_pitch.max(0) as usize,
-                frame_size_48k - short_n,
+                short_n,
+                self.postfilter_gain_old,
                 self.postfilter_gain,
-                postfilter_gain,
+                self.postfilter_tapset_old,
                 self.postfilter_tapset,
-                decoded_tapset,
                 self.mode.window,
                 self.mode.overlap,
             );
+            if lm != 0 && frame_size_48k > short_n {
+                Self::comb_filter_in_place(
+                    &mut self.decode_mem,
+                    out_start + short_n,
+                    pf_period,
+                    postfilter_pitch.max(0) as usize,
+                    frame_size_48k - short_n,
+                    self.postfilter_gain,
+                    postfilter_gain,
+                    self.postfilter_tapset,
+                    decoded_tapset,
+                    self.mode.window,
+                    self.mode.overlap,
+                );
+            }
         }
         self.postfilter_period_old = self.postfilter_period;
         self.postfilter_gain_old = self.postfilter_gain;
@@ -1375,6 +1718,52 @@ impl CeltDecoder {
             }
             // #endregion
         }
+        if packet_idx == 905 {
+            let post_comb = &self.decode_mem[out_start..out_start + frame_size_48k];
+            let post_comb_abs: f32 = post_comb.iter().map(|x| x.abs()).sum();
+            let first_n = post_comb.len().min(8);
+            eprintln!(
+                "R pkt905 post_comb abs_sum={:.6} first{}={:?}",
+                post_comb_abs,
+                first_n,
+                &post_comb[..first_n]
+            );
+        }
+        if debug_packet {
+            let post_comb = &self.decode_mem[out_start..out_start + frame_size_48k];
+            let post_comb_abs: f32 = post_comb.iter().map(|x| x.abs()).sum();
+            let mut first8_csv = String::new();
+            for x in post_comb.iter().take(8) {
+                if !first8_csv.is_empty() {
+                    first8_csv.push(';');
+                }
+                first8_csv.push_str(&format!("{:.6}", x));
+            }
+            let data = format!(
+                "{{\"packet_idx\":{},\"disable_comb_filter\":{},\"post_comb_abs\":{},\"post_comb_first8_csv\":\"{}\",\"pf_period_old_in\":{},\"pf_period_in\":{},\"pf_period_old_out\":{},\"pf_period_out\":{},\"pf_gain_old_out\":{},\"pf_gain_out\":{},\"pf_tapset_old_out\":{},\"pf_tapset_out\":{}}}",
+                packet_idx,
+                disable_comb_filter,
+                post_comb_abs,
+                first8_csv,
+                pf_period_old,
+                pf_period,
+                self.postfilter_period_old,
+                self.postfilter_period,
+                self.postfilter_gain_old,
+                self.postfilter_gain,
+                self.postfilter_tapset_old,
+                self.postfilter_tapset
+            );
+            // #region agent log
+            Self::append_debug_log(
+                "run-onset-map-v1",
+                "H4",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "post_comb_and_pf_state",
+                &data,
+            );
+            // #endregion
+        }
 
         let nb_ebands = self.mode.nb_ebands;
         let state_len = 2 * nb_ebands;
@@ -1422,6 +1811,39 @@ impl CeltDecoder {
         for ch in 0..self.channels as usize {
             let mut ch_synth = self.decode_mem[out_start..out_start + frame_size_48k].to_vec();
             self.apply_deemph(ch, &mut ch_synth);
+            if packet_idx == 905 && ch == 0 {
+                let post_deemph_abs: f32 = ch_synth.iter().map(|x| x.abs()).sum();
+                let first_n = ch_synth.len().min(8);
+                eprintln!(
+                    "R pkt905 post_deemph abs_sum={:.6} first{}={:?}",
+                    post_deemph_abs,
+                    first_n,
+                    &ch_synth[..first_n]
+                );
+            }
+            if debug_packet && ch == 0 {
+                let post_deemph_abs: f32 = ch_synth.iter().map(|x| x.abs()).sum();
+                let mut first8_csv = String::new();
+                for x in ch_synth.iter().take(8) {
+                    if !first8_csv.is_empty() {
+                        first8_csv.push(';');
+                    }
+                    first8_csv.push_str(&format!("{:.6}", x));
+                }
+                let data = format!(
+                    "{{\"packet_idx\":{},\"post_deemph_abs\":{},\"deemph_mem0_out\":{},\"post_deemph_first8_csv\":\"{}\"}}",
+                    packet_idx, post_deemph_abs, self.deemph_mem[ch], first8_csv
+                );
+                // #region agent log
+                Self::append_debug_log(
+                    "run-onset-map-v1",
+                    "H1",
+                    "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                    "post_deemph",
+                    &data,
+                );
+                // #endregion
+            }
             if packet_idx == 0 && ch == 0 && frame_size_48k > 170 {
                 let mut win_csv = String::new();
                 for i in 160..=170 {
