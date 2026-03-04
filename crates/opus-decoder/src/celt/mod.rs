@@ -38,6 +38,8 @@ const TF_SELECT_TABLE: [[i8; 8]; 4] = [
 ];
 const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log";
 const DEBUG_SESSION_ID: &str = "4200c5";
+const DEBUG_RUNTIME_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-a08c80.log";
+const DEBUG_RUNTIME_SESSION_ID: &str = "a08c80";
 static TRACE_PACKET_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// Result of decoding one CELT frame.
@@ -265,6 +267,34 @@ impl CeltDecoder {
             let line = format!(
                 "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
                 DEBUG_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
+            );
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+    }
+
+    /// Append one NDJSON debug entry to the active runtime debug session.
+    ///
+    /// Params: run metadata and JSON payload string.
+    /// Returns: nothing.
+    fn append_runtime_debug_log(
+        run_id: &str,
+        hypothesis_id: &str,
+        location: &str,
+        message: &str,
+        data_json: &str,
+    ) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(DEBUG_RUNTIME_LOG_PATH)
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+                DEBUG_RUNTIME_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
             );
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
@@ -879,7 +909,7 @@ impl CeltDecoder {
             }
             // #endregion
         }
-        let _collapse_masks = if let Some(ref mut side) = mdct_side {
+        let collapse_masks = if let Some(ref mut side) = mdct_side {
             bands::quant_all_bands_stereo(
                 self.mode,
                 start,
@@ -917,6 +947,67 @@ impl CeltDecoder {
                 &mut self.rng_seed,
             )
         };
+        let anti_probe_packet = packet_idx <= 8 || trace_this_packet;
+        let collapse_blocks = 1usize << lm;
+        let collapse_mask_limit = if collapse_blocks >= 8 {
+            0xFFu8
+        } else {
+            ((1u16 << collapse_blocks) - 1) as u8
+        };
+        let collapse_nonfull_count = collapse_masks
+            .iter()
+            .filter(|&&m| (m & collapse_mask_limit) != collapse_mask_limit)
+            .count();
+        let collapse_empty_count = collapse_masks
+            .iter()
+            .filter(|&&m| (m & collapse_mask_limit) == 0)
+            .count();
+        if anti_probe_packet {
+            let data = format!(
+                "{{\"packet_idx\":{},\"lm\":{},\"coded_channels\":{},\"collapse_masks_len\":{},\"collapse_mask_limit\":{},\"collapse_nonfull_count\":{},\"collapse_empty_count\":{},\"seed_after_quant\":{},\"ec_rng_after_quant\":{},\"anti_collapse_rsv\":{},\"is_transient\":{}}}",
+                packet_idx,
+                lm,
+                coded_channels,
+                collapse_masks.len(),
+                collapse_mask_limit,
+                collapse_nonfull_count,
+                collapse_empty_count,
+                self.rng_seed,
+                ec.rng(),
+                anti_collapse_rsv,
+                is_transient
+            );
+            // #region agent log
+            Self::append_runtime_debug_log(
+                "run-anti-collapse-v1",
+                "H2",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "anti_collapse_post_quant_state",
+                &data,
+            );
+            // #endregion
+        }
+        if packet_idx <= 10 || coded_channels == 2 {
+            let data = format!(
+                "{{\"packet_idx\":{},\"coded_channels\":{},\"output_channels\":{},\"is_transient\":{},\"lm\":{},\"anti_collapse_rsv\":{},\"collapse_nonfull_count\":{}}}",
+                packet_idx,
+                coded_channels,
+                self.channels,
+                is_transient,
+                lm,
+                anti_collapse_rsv,
+                collapse_nonfull_count
+            );
+            // #region agent log
+            Self::append_runtime_debug_log(
+                "run-coded-channels-scan-v1",
+                "H9",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "coded_channels_state",
+                &data,
+            );
+            // #endregion
+        }
         if trace_this_packet {
             // #region agent log
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1071,8 +1162,9 @@ impl CeltDecoder {
             // #endregion
         }
         // Anti-collapse bit (consumed from range coder for transient frames).
+        let mut anti_collapse_on = 0u32;
         if anti_collapse_rsv > 0 {
-            let anti_collapse_on = ec.dec_bits(1);
+            anti_collapse_on = ec.dec_bits(1);
             if trace_this_packet
                 || std::env::var("OPUS_TRACE_ANTI_COLLAPSE").ok().as_deref() == Some("1")
             {
@@ -1131,6 +1223,41 @@ impl CeltDecoder {
             );
             // #endregion
         }
+        if anti_probe_packet {
+            let data = format!(
+                "{{\"packet_idx\":{},\"anti_collapse_rsv\":{},\"anti_collapse_on\":{},\"seed_before_apply\":{},\"ec_rng_before_apply\":{},\"is_transient\":{},\"lm\":{},\"collapse_nonfull_count\":{}}}",
+                packet_idx,
+                anti_collapse_rsv,
+                anti_collapse_on,
+                self.rng_seed,
+                ec.rng(),
+                is_transient,
+                lm,
+                collapse_nonfull_count
+            );
+            // #region agent log
+            Self::append_runtime_debug_log(
+                "run-anti-collapse-v1",
+                "H1",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "anti_collapse_gate_state",
+                &data,
+            );
+            // #endregion
+        }
+        let anti_pre_main_abs = if anti_probe_packet {
+            mdct_in.iter().map(|v| v.abs()).sum::<f32>()
+        } else {
+            0.0
+        };
+        let anti_pre_side_abs = if anti_probe_packet {
+            mdct_side
+                .as_ref()
+                .map(|side| side.iter().map(|v| v.abs()).sum::<f32>())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         quant_bands::unquant_energy_finalise(
             self.mode,
             start,
@@ -1142,6 +1269,80 @@ impl CeltDecoder {
             &mut ec,
             coded_channels,
         );
+        if anti_collapse_on != 0 {
+            if trace_this_packet {
+                eprintln!(
+                    "R pkt{} applying anti_collapse lm={} coded_channels={} seed={}",
+                    packet_idx, lm, coded_channels, self.rng_seed
+                );
+            }
+            if let Some(side) = mdct_side.as_mut() {
+                bands::anti_collapse(
+                    self.mode,
+                    &mut mdct_in,
+                    Some(side),
+                    &collapse_masks,
+                    lm,
+                    coded_channels,
+                    start,
+                    end,
+                    &self.prev_energy,
+                    &self.old_log_energy,
+                    &self.old_log_energy2,
+                    &alloc.pulses,
+                    self.rng_seed,
+                    trace_this_packet,
+                    packet_idx,
+                );
+            } else {
+                bands::anti_collapse(
+                    self.mode,
+                    &mut mdct_in,
+                    None,
+                    &collapse_masks,
+                    lm,
+                    coded_channels,
+                    start,
+                    end,
+                    &self.prev_energy,
+                    &self.old_log_energy,
+                    &self.old_log_energy2,
+                    &alloc.pulses,
+                    self.rng_seed,
+                    trace_this_packet,
+                    packet_idx,
+                );
+            }
+        }
+        if anti_probe_packet {
+            let anti_post_main_abs = mdct_in.iter().map(|v| v.abs()).sum::<f32>();
+            let anti_post_side_abs = mdct_side
+                .as_ref()
+                .map(|side| side.iter().map(|v| v.abs()).sum::<f32>())
+                .unwrap_or(0.0);
+            let data = format!(
+                "{{\"packet_idx\":{},\"anti_collapse_on\":{},\"main_abs_before\":{},\"main_abs_after\":{},\"side_abs_before\":{},\"side_abs_after\":{},\"main_abs_delta\":{},\"side_abs_delta\":{},\"seed_after_apply\":{},\"ec_rng_after_apply\":{}}}",
+                packet_idx,
+                anti_collapse_on,
+                anti_pre_main_abs,
+                anti_post_main_abs,
+                anti_pre_side_abs,
+                anti_post_side_abs,
+                anti_post_main_abs - anti_pre_main_abs,
+                anti_post_side_abs - anti_pre_side_abs,
+                self.rng_seed,
+                ec.rng()
+            );
+            // #region agent log
+            Self::append_runtime_debug_log(
+                "run-anti-collapse-v1",
+                "H5",
+                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
+                "anti_collapse_apply_effect",
+                &data,
+            );
+            // #endregion
+        }
         let mut denorm = vec![0.0f32; frame_size_48k];
         bands::denormalise_bands(
             self.mode,

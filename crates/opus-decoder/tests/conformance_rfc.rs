@@ -4,6 +4,67 @@ use std::path::{Path, PathBuf};
 
 use opus_decoder::{Decoder, Error};
 
+const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log";
+const DEBUG_SESSION_ID: &str = "4200c5";
+
+/// Check whether packet should emit targeted packet-delta debug logs.
+///
+/// Params: `packet_idx` absolute packet index in the vector stream.
+/// Returns: true when packet is in onset/hotspot probe set.
+fn should_trace_debug_packet(packet_idx: usize) -> bool {
+    packet_idx <= 20
+        || matches!(
+            packet_idx,
+            138
+                | 160
+                | 162
+                | 499
+                | 605
+                | 611
+                | 905
+                | 906
+                | 907
+                | 2534
+                | 3353
+                | 3536
+                | 3541
+                | 3979
+                | 3986
+                | 3992
+                | 3998
+                | 3999
+        )
+}
+
+/// Append one NDJSON debug entry to the shared debug log file.
+///
+/// Params: `run_id` run label, `hypothesis_id` tested hypothesis, `location`
+/// source marker, `message` event name, and `data_json` object string.
+/// Returns: nothing.
+fn append_debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data_json: &str,
+) {
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DEBUG_LOG_PATH)
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+            DEBUG_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
+        );
+        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    }
+}
+
 #[derive(Debug)]
 struct Vector {
     name: String,
@@ -81,6 +142,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
     let mut got_pcm = Vec::<i16>::new();
     let mut packet_end_samples = Vec::<usize>::new();
     let mut final_range_mismatches: Vec<(usize, u32, u32)> = Vec::new();
+    let dump_got_pcm = std::env::var("OPUS_DUMP_GOT_PCM").ok().as_deref() == Some("1");
     let trace_packet_idx = std::env::var("OPUS_TRACE_PACKET_IDX")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
@@ -91,13 +153,109 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
     let trace_first10 = std::env::var("OPUS_TRACE_FIRST10").ok().as_deref() == Some("1");
     let trace_match_all = std::env::var("OPUS_TRACE_MATCH_ALL").ok().as_deref() == Some("1");
     let trace_pcm_1_10 = std::env::var("OPUS_TRACE_PCM_1_10").ok().as_deref() == Some("1");
+    let trace_packet_max_delta =
+        std::env::var("OPUS_TRACE_PACKET_MAX_DELTA").ok().as_deref() == Some("1");
 
     for (packet_idx, p) in packets.into_iter().enumerate() {
         match dec.decode(p.packet.as_deref(), &mut out) {
             Ok(samples_per_channel) => {
+                let pkt_start = got_pcm.len();
                 let written = samples_per_channel * v.channels as usize;
                 got_pcm.extend_from_slice(&out[..written]);
-                packet_end_samples.push(got_pcm.len());
+                let pkt_end = got_pcm.len();
+                packet_end_samples.push(pkt_end);
+                let expected_debug_len = if v.channels == 1 {
+                    expected_pcm.len() / 2
+                } else {
+                    expected_pcm.len()
+                };
+                if pkt_start < expected_debug_len {
+                    let compare_end = pkt_end.min(expected_debug_len);
+                    let mut max_delta = 0i32;
+                    let mut first_diff_idx: isize = -1;
+                    let mut first_diff_delta = 0i32;
+                    let mut first_expected = 0i16;
+                    let mut first_got = 0i16;
+                    let mut max_diff_idx: isize = -1;
+                    let mut max_diff_delta = 0i32;
+                    let mut max_expected = 0i16;
+                    let mut max_got = 0i16;
+                    for i in pkt_start..compare_end {
+                        let expected_i16 = if v.channels == 1 {
+                            let l = expected_pcm[2 * i] as i32;
+                            let r = expected_pcm[2 * i + 1] as i32;
+                            ((l + r) / 2) as i16
+                        } else {
+                            expected_pcm[i]
+                        };
+                        let delta = got_pcm[i] as i32 - expected_i16 as i32;
+                        let abs_delta = delta.abs();
+                        if abs_delta > max_delta {
+                            max_delta = abs_delta;
+                            max_diff_idx = i as isize;
+                            max_diff_delta = delta;
+                            max_expected = expected_i16;
+                            max_got = got_pcm[i];
+                        }
+                        if first_diff_idx == -1 && delta != 0 {
+                            first_diff_idx = i as isize;
+                            first_diff_delta = delta;
+                            first_expected = expected_i16;
+                            first_got = got_pcm[i];
+                        }
+                    }
+                    if max_delta > 50 {
+                        eprintln!(
+                            "DELTA pkt {} max_delta={} frame_size={} sample_range={}..{}",
+                            packet_idx, max_delta, written, pkt_start, pkt_end
+                        );
+                    }
+                    if should_trace_debug_packet(packet_idx) || max_delta > 500 {
+                        let mut got_start8_csv = String::new();
+                        let mut exp_start8_csv = String::new();
+                        for i in pkt_start..(pkt_start + 8).min(compare_end) {
+                            if !got_start8_csv.is_empty() {
+                                got_start8_csv.push(';');
+                                exp_start8_csv.push(';');
+                            }
+                            got_start8_csv.push_str(&got_pcm[i].to_string());
+                            if v.channels == 1 {
+                                let l = expected_pcm[2 * i] as i32;
+                                let r = expected_pcm[2 * i + 1] as i32;
+                                exp_start8_csv.push_str(&(((l + r) / 2) as i16).to_string());
+                            } else {
+                                exp_start8_csv.push_str(&expected_pcm[i].to_string());
+                            }
+                        }
+                        let data = format!(
+                            "{{\"packet_idx\":{},\"frame_size\":{},\"sample_start\":{},\"sample_end\":{},\"max_delta\":{},\"max_diff_idx\":{},\"max_diff_delta\":{},\"max_expected\":{},\"max_got\":{},\"first_diff_idx\":{},\"first_diff_delta\":{},\"first_expected\":{},\"first_got\":{},\"got_start8_csv\":\"{}\",\"exp_start8_csv\":\"{}\"}}",
+                            packet_idx,
+                            written,
+                            pkt_start,
+                            pkt_end,
+                            max_delta,
+                            max_diff_idx,
+                            max_diff_delta,
+                            max_expected,
+                            max_got,
+                            first_diff_idx,
+                            first_diff_delta,
+                            first_expected,
+                            first_got,
+                            got_start8_csv,
+                            exp_start8_csv
+                        );
+                        // #region agent log
+                        append_debug_log(
+                            "run-onset-map-v1",
+                            "H3",
+                            "crates/opus-decoder/tests/conformance_rfc.rs:run_vector",
+                            "packet_delta",
+                            &data,
+                        );
+                        // #endregion
+                    }
+                }
                 if trace_pkt0_pcm8 && packet_idx == 0 && written >= 8 {
                     eprintln!(
                         "[RUST] pkt0 pcm[0..8]: {} {} {} {} {} {} {} {}",
@@ -204,6 +362,14 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 "  packet #{packet_idx}: expected 0x{expected:08x}, got 0x{got:08x}"
             );
         }
+    }
+
+    if dump_got_pcm {
+        let mut out_bytes = Vec::with_capacity(got_pcm.len() * 2);
+        for s in &got_pcm {
+            out_bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        fs::write("/tmp/rust_tv07.pcm", out_bytes)?;
     }
 
     // Fast path: exact match against either output.
@@ -313,6 +479,33 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
         // #endregion
+        if trace_packet_max_delta {
+            let mut range_start = 0usize;
+            for (packet_idx, &packet_end) in packet_end_samples.iter().enumerate() {
+                if range_start >= min_len {
+                    break;
+                }
+                let range_end = packet_end.min(min_len);
+                if range_end <= range_start {
+                    continue;
+                }
+                let mut max_delta = 0i32;
+                let mut sum_sq = 0.0f64;
+                for i in range_start..range_end {
+                    let d = expected_pcm[i] as i32 - got_pcm[i] as i32;
+                    let ad = d.abs();
+                    if ad > max_delta {
+                        max_delta = ad;
+                    }
+                    sum_sq += (d as f64) * (d as f64);
+                }
+                let rms = (sum_sq / (range_end - range_start) as f64).sqrt();
+                if max_delta > 50 {
+                    eprintln!("[RUST] pkt{} max_delta={} rms={:.1}", packet_idx, max_delta, rms);
+                }
+                range_start = range_end;
+            }
+        }
     }
     if let Some(alt_pcm) = &alt_pcm {
         if *alt_pcm != got_pcm {

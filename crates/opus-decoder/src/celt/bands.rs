@@ -12,12 +12,18 @@ const QTHETA_OFFSET: i32 = 4;
 const QTHETA_OFFSET_TWOPHASE: i32 = 16;
 const SPREAD_AGGRESSIVE: i32 = 3;
 const BIT_INTERLEAVE_TABLE: [u32; 16] = [0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3];
+const BIT_DEINTERLEAVE_TABLE: [u8; 16] = [
+    0x00, 0x03, 0x0C, 0x0F, 0x30, 0x33, 0x3C, 0x3F, 0xC0, 0xC3, 0xCC, 0xCF, 0xF0, 0xF3, 0xFC,
+    0xFF,
+];
 const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
 const ORDERY_TABLE: [usize; 30] = [
     1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2,
     10, 5,
 ];
 static TRACE_BANDS_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
+const DEBUG_LOG_PATH_A08C80: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-a08c80.log";
+const DEBUG_SESSION_ID_A08C80: &str = "a08c80";
 
 /// CELT linear congruential generator used for folded/noise fill.
 ///
@@ -25,6 +31,193 @@ static TRACE_BANDS_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 /// Returns: next pseudo-random seed.
 pub(crate) fn celt_lcg_rand(seed: u32) -> u32 {
     seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223)
+}
+
+/// Append one NDJSON debug entry for anti-collapse probes.
+///
+/// Params: run metadata plus `data_json` object payload.
+/// Returns: nothing.
+fn append_anti_collapse_debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data_json: &str,
+) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DEBUG_LOG_PATH_A08C80)
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+            DEBUG_SESSION_ID_A08C80, run_id, hypothesis_id, location, message, data_json, ts
+        );
+        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    }
+}
+
+/// Prevent transient energy collapse by injecting low-level noise.
+///
+/// Params: mode, normalized spectra (`x`/optional `y`), per-band collapse masks,
+/// band/frame context (`lm`, `coded_channels`, `start`, `end`), energy history
+/// (`log_e`, `prev1_log_e`, `prev2_log_e`), pulse allocation and RNG seed.
+/// Returns: nothing; vectors are modified in-place.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn anti_collapse(
+    mode: &CeltMode,
+    x: &mut [f32],
+    mut y: Option<&mut [f32]>,
+    collapse_masks: &[u8],
+    lm: usize,
+    coded_channels: usize,
+    start: usize,
+    end: usize,
+    log_e: &[f32],
+    prev1_log_e: &[f32],
+    prev2_log_e: &[f32],
+    pulses: &[i32],
+    seed: u32,
+    trace_this_packet: bool,
+    packet_idx: usize,
+) {
+    let nb = mode.nb_ebands;
+    if coded_channels == 0 || lm > 3 {
+        return;
+    }
+    let run_id = "run-anti-collapse-v1";
+    let probe_packet = packet_idx <= 8 || trace_this_packet;
+    let mut seed_local = seed;
+    let blocks = 1usize << lm;
+    let block_mask_limit = if blocks >= 8 { 0xFFu8 } else { ((1u16 << blocks) - 1) as u8 };
+    if probe_packet {
+        let data = format!(
+            "{{\"packet_idx\":{},\"lm\":{},\"coded_channels\":{},\"start\":{},\"end\":{},\"seed_in\":{},\"blocks\":{},\"collapse_masks_len\":{},\"block_mask_limit\":{}}}",
+            packet_idx,
+            lm,
+            coded_channels,
+            start,
+            end,
+            seed,
+            blocks,
+            collapse_masks.len(),
+            block_mask_limit
+        );
+        // #region agent log
+        append_anti_collapse_debug_log(
+            run_id,
+            "H1",
+            "crates/opus-decoder/src/celt/bands.rs:anti_collapse",
+            "anti_collapse_entry",
+            &data,
+        );
+        // #endregion
+    }
+
+    for i in start..end {
+        let n0 = (mode.e_bands[i + 1] - mode.e_bands[i]) as usize;
+        if n0 == 0 || i >= pulses.len() {
+            continue;
+        }
+        let depth = (((1 + pulses[i].max(0)) as usize) / n0) >> lm;
+        let thresh = 0.5 * (2.0f32).powf(-0.125 * depth as f32);
+        let sqrt_1 = 1.0 / ((n0 << lm) as f32).sqrt();
+        let band_start = (mode.e_bands[i] as usize) << lm;
+        let band_len = n0 << lm;
+
+        for c in 0..coded_channels.min(2) {
+            let chan = if c == 0 {
+                &mut x[..]
+            } else if let Some(yv) = y.as_deref_mut() {
+                yv
+            } else {
+                continue;
+            };
+            if band_start + band_len > chan.len() {
+                continue;
+            }
+            let mut prev1 = prev1_log_e[c * nb + i];
+            let mut prev2 = prev2_log_e[c * nb + i];
+            if coded_channels == 1 {
+                prev1 = prev1.max(prev1_log_e[nb + i]);
+                prev2 = prev2.max(prev2_log_e[nb + i]);
+            }
+            let ediff = (log_e[c * nb + i] - prev1.min(prev2)).max(0.0);
+            let mut r = 2.0 * (2.0f32).powf(-ediff);
+            if lm == 3 {
+                r *= std::f32::consts::SQRT_2;
+            }
+            r = r.min(thresh) * sqrt_1;
+
+            let mask_idx = i * coded_channels + c;
+            if mask_idx >= collapse_masks.len() {
+                continue;
+            }
+            let collapse_mask = collapse_masks[mask_idx] & block_mask_limit;
+            let mut injected_blocks = 0usize;
+            let band = &mut chan[band_start..band_start + band_len];
+            let band_pre_abs = if probe_packet {
+                band.iter().map(|v| v.abs()).sum::<f32>()
+            } else {
+                0.0
+            };
+            for k in 0..blocks {
+                if (collapse_mask & (1u8 << k)) == 0 {
+                    for j in 0..n0 {
+                        seed_local = celt_lcg_rand(seed_local);
+                        band[(j << lm) + k] = if (seed_local & 0x8000) != 0 { r } else { -r };
+                    }
+                    injected_blocks += 1;
+                }
+            }
+            if injected_blocks > 0 {
+                vq::renormalise_vector(band, 1.0);
+            }
+            let band_post_abs = if probe_packet {
+                band.iter().map(|v| v.abs()).sum::<f32>()
+            } else {
+                0.0
+            };
+            if probe_packet && (collapse_mask != block_mask_limit || injected_blocks > 0) {
+                let data = format!(
+                    "{{\"packet_idx\":{},\"band\":{},\"channel\":{},\"depth\":{},\"ediff\":{},\"r\":{},\"collapse_mask\":{},\"block_mask_limit\":{},\"injected_blocks\":{},\"band_pre_abs\":{},\"band_post_abs\":{}}}",
+                    packet_idx,
+                    i,
+                    c,
+                    depth,
+                    ediff,
+                    r,
+                    collapse_mask,
+                    block_mask_limit,
+                    injected_blocks,
+                    band_pre_abs,
+                    band_post_abs
+                );
+                let hypothesis = if injected_blocks > 0 { "H3" } else { "H2" };
+                // #region agent log
+                append_anti_collapse_debug_log(
+                    run_id,
+                    hypothesis,
+                    "crates/opus-decoder/src/celt/bands.rs:anti_collapse",
+                    "anti_collapse_band_probe",
+                    &data,
+                );
+                // #endregion
+            }
+            if trace_this_packet && (injected_blocks > 0 || i >= 18) {
+                // #region agent log
+                eprintln!(
+                    "R pkt{} anti_collapse band={} ch={} depth={} ediff={:.6} r={:.6} mask=0x{:x} injected_blocks={}",
+                    packet_idx, i, c, depth, ediff, r, collapse_mask, injected_blocks
+                );
+                // #endregion
+            }
+        }
+    }
 }
 
 /// Integer square-root for non-negative 32-bit values.
@@ -175,6 +368,30 @@ fn apply_quant_band_post_tf(
     }
     for k in 0..recombine {
         haar1(x, n >> k, 1 << k);
+    }
+}
+
+/// Apply quant-band collapse-mask post-processing after TF transforms.
+///
+/// Params: raw collapse mask from `quant_partition`, transformed block count,
+/// recombine/time-divide context.
+/// Returns: collapse mask mapped back to frame block layout.
+fn post_tf_collapse_mask(mut cm: u32, b0: usize, recombine: usize, time_divide: usize) -> u32 {
+    let mut b = b0.max(1);
+    for _ in 0..time_divide {
+        b >>= 1;
+        if b > 0 {
+            cm |= cm >> b;
+        }
+    }
+    for _ in 0..recombine {
+        cm = BIT_DEINTERLEAVE_TABLE[(cm & 0x0F) as usize] as u32;
+    }
+    let final_b = b0 << recombine;
+    if final_b >= 32 {
+        cm
+    } else {
+        cm & ((1u32 << final_b) - 1)
     }
 }
 
@@ -426,6 +643,7 @@ fn quant_band_stereo_decode(
     recombine: usize,
     time_divide: usize,
     long_blocks: bool,
+    mut mid_history_out: Option<&mut [f32]>,
     trace_this_packet: bool,
     packet_idx: usize,
 ) -> u32 {
@@ -459,7 +677,7 @@ fn quant_band_stereo_decode(
         intensity,
         *remaining_bits,
     );
-    if trace_this_packet && band_idx == 12 {
+    if trace_this_packet && (band_idx == 12 || band_idx >= 18) {
         // #region agent log
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -513,6 +731,12 @@ fn quant_band_stereo_decode(
             apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
             x[0] = -(sign as f32) * y[1];
             x[1] = (sign as f32) * y[0];
+            if let Some(dst) = mid_history_out.as_deref_mut() {
+                let scale = (n as f32).sqrt();
+                for (d, s) in dst.iter_mut().zip(y.iter()) {
+                    *d = *s * scale;
+                }
+            }
             let xl0 = mid_gain * x[0];
             let xl1 = mid_gain * x[1];
             let yr0 = side_gain * y[0];
@@ -525,7 +749,7 @@ fn quant_band_stereo_decode(
                 y[0] = -y[0];
                 y[1] = -y[1];
             }
-            return cm;
+            return post_tf_collapse_mask(cm, blocks, recombine, time_divide);
         }
         let cm = quant_partition_mono(
             mode,
@@ -545,6 +769,12 @@ fn quant_band_stereo_decode(
             packet_idx,
         );
         apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
+        if let Some(dst) = mid_history_out.as_deref_mut() {
+            let scale = (n as f32).sqrt();
+            for (d, s) in dst.iter_mut().zip(x.iter()) {
+                *d = *s * scale;
+            }
+        }
         y[0] = -(sign as f32) * x[1];
         y[1] = (sign as f32) * x[0];
         let xl0 = mid_gain * x[0];
@@ -559,7 +789,7 @@ fn quant_band_stereo_decode(
             y[0] = -y[0];
             y[1] = -y[1];
         }
-        return cm;
+        return post_tf_collapse_mask(cm, blocks, recombine, time_divide);
     }
 
     let mut mbits = 0.max(b.min((b - delta) / 2));
@@ -651,13 +881,19 @@ fn quant_band_stereo_decode(
         apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
         cm
     };
+    if let Some(dst) = mid_history_out.as_deref_mut() {
+        let scale = (n as f32).sqrt();
+        for (d, s) in dst.iter_mut().zip(x.iter()) {
+            *d = *s * scale;
+        }
+    }
     stereo_merge_float(x, y, mid_gain);
     if inv {
         for v in y.iter_mut() {
             *v = -*v;
         }
     }
-    cm
+    post_tf_collapse_mask(cm, blocks, recombine, time_divide)
 }
 
 /// Decode one mono partition with recursive split.
@@ -705,7 +941,7 @@ fn quant_partition_mono(
         }
         return 1;
     }
-    if trace_this_packet && band_idx == 12 {
+    if trace_this_packet && (band_idx == 12 || band_idx >= 18) {
         // #region agent log
         eprintln!(
             "R pkt{} qpart enter: N={} b={} B={} lm={} rem_bits={} tell={}",
@@ -756,7 +992,7 @@ fn quant_partition_mono(
         let mut mbits = 0.max(b.min((b - delta) / 2));
         let mut sbits = b - mbits;
         *remaining_bits -= qalloc;
-        if trace_this_packet && band_idx == 12 {
+        if trace_this_packet && (band_idx == 12 || band_idx >= 18) {
             // #region agent log
             eprintln!(
                 "R pkt{} qpart split: N={} n={} qalloc={} itheta={} delta={} mbits={} sbits={} rem_bits={} tell={}",
@@ -873,7 +1109,7 @@ fn quant_partition_mono(
         curr_bits = rate::pulses2bits(mode, band_idx, lm, q);
         *remaining_bits -= curr_bits;
     }
-    if trace_this_packet && band_idx == 12 {
+    if trace_this_packet && (band_idx == 12 || band_idx >= 18) {
         // #region agent log
         eprintln!(
             "R pkt{} qpart nosplit: N={} b={} q={} curr_bits={} rem_bits={} tell={}",
@@ -898,6 +1134,19 @@ fn quant_partition_mono(
         (1u32 << blocks) - 1
     };
     let fill_masked = fill & cm_mask;
+    if trace_this_packet && (band_idx == 12 || band_idx >= 18) {
+        let (has_lowband, lowband_abs) = if let Some(lb) = lowband {
+            (true, lb.iter().map(|v| v.abs()).sum::<f32>())
+        } else {
+            (false, -1.0)
+        };
+        // #region agent log
+        eprintln!(
+            "R pkt{} qpart q0: N={} b={} B={} fill=0x{:x} has_lowband={} lowband_abs={:.6} gain={:.6}",
+            packet_idx, n0, b, blocks, fill_masked, has_lowband, lowband_abs, gain
+        );
+        // #endregion
+    }
     if fill_masked == 0 {
         x.fill(0.0);
         return 0;
@@ -1092,7 +1341,7 @@ pub(crate) fn quant_all_bands_mono(
             None
         };
         let tell_before = dec.tell_frac();
-        let cm = quant_partition_mono(
+        let mut cm = quant_partition_mono(
             mode,
             &mut x_after[..n],
             i,
@@ -1109,6 +1358,7 @@ pub(crate) fn quant_all_bands_mono(
             trace_this_packet,
             packet_idx,
         );
+        let cm_raw = cm;
         apply_quant_band_post_tf(
             &mut x_after[..n],
             n,
@@ -1117,6 +1367,30 @@ pub(crate) fn quant_all_bands_mono(
             time_divide,
             long_blocks,
         );
+        cm = post_tf_collapse_mask(cm, b_blocks, recombine, time_divide);
+        if packet_idx <= 8 || trace_this_packet {
+            let data = format!(
+                "{{\"packet_idx\":{},\"band\":{},\"frame_blocks\":{},\"b_blocks\":{},\"recombine\":{},\"time_divide\":{},\"cm_raw\":{},\"cm_post\":{},\"cm_used\":{}}}",
+                packet_idx,
+                i,
+                frame_blocks,
+                b_blocks,
+                recombine,
+                time_divide,
+                cm_raw,
+                post_tf_collapse_mask(cm_raw, b_blocks, recombine, time_divide),
+                cm
+            );
+            // #region agent log
+            append_anti_collapse_debug_log(
+                "run-collapse-mask-ab-v1",
+                "H8",
+                "crates/opus-decoder/src/celt/bands.rs:quant_all_bands_mono",
+                "collapse_mask_post_tf_mapping",
+                &data,
+            );
+            // #endregion
+        }
         if i + 1 < end {
             let scale = (n as f32).sqrt();
             for j in 0..n {
@@ -1372,7 +1646,7 @@ pub(crate) fn quant_all_bands_stereo(
                 i,
                 b,
                 b_blocks,
-                lowband_x_for_quant,
+                lowband_x_for_quant.as_deref(),
                 lm as i32,
                 fill,
                 spread_eff,
@@ -1383,6 +1657,7 @@ pub(crate) fn quant_all_bands_stereo(
                 recombine,
                 time_divide,
                 long_blocks,
+                None,
                 trace_this_packet,
                 packet_idx,
             )
