@@ -387,7 +387,7 @@ fn post_tf_collapse_mask(mut cm: u32, b0: usize, recombine: usize, time_divide: 
     for _ in 0..recombine {
         cm = BIT_DEINTERLEAVE_TABLE[(cm & 0x0F) as usize] as u32;
     }
-    let final_b = b0 << recombine;
+    let final_b = b << recombine;
     if final_b >= 32 {
         cm
     } else {
@@ -969,6 +969,29 @@ fn quant_partition_mono(
     } else {
         false
     };
+    if packet_idx == 6 && band_idx == 8 {
+        let data = format!(
+            "{{\"packet_idx\":{},\"band\":{},\"stage\":\"entry\",\"n\":{},\"b\":{},\"blocks\":{},\"lm\":{},\"do_split\":{},\"remaining_bits\":{},\"tell\":{}}}",
+            packet_idx,
+            band_idx,
+            n0,
+            b,
+            blocks,
+            lm,
+            do_split,
+            *remaining_bits,
+            dec.tell_frac()
+        );
+        // #region agent log
+        append_anti_collapse_debug_log(
+            "run-pkt6-quant-decision-v1",
+            "H89",
+            "crates/opus-decoder/src/celt/bands.rs:quant_partition_mono",
+            "rust_pkt6_band8_qpart_entry",
+            &data,
+        );
+        // #endregion
+    }
     if do_split {
         let n = n0 >> 1;
         let (x_lo, x_hi) = x.split_at_mut(n);
@@ -992,6 +1015,32 @@ fn quant_partition_mono(
         let mut mbits = 0.max(b.min((b - delta) / 2));
         let mut sbits = b - mbits;
         *remaining_bits -= qalloc;
+        if packet_idx == 6 && band_idx == 8 {
+            let data = format!(
+                "{{\"packet_idx\":{},\"band\":{},\"stage\":\"split\",\"n\":{},\"mbits\":{},\"sbits\":{},\"delta\":{},\"qalloc\":{},\"itheta\":{},\"blocks\":{},\"lm\":{},\"remaining_bits\":{},\"tell\":{}}}",
+                packet_idx,
+                band_idx,
+                n0,
+                mbits,
+                sbits,
+                delta,
+                qalloc,
+                itheta,
+                blocks,
+                lm,
+                *remaining_bits,
+                dec.tell_frac()
+            );
+            // #region agent log
+            append_anti_collapse_debug_log(
+                "run-pkt6-quant-decision-v1",
+                "H89",
+                "crates/opus-decoder/src/celt/bands.rs:quant_partition_mono",
+                "rust_pkt6_band8_qpart_split",
+                &data,
+            );
+            // #endregion
+        }
         if trace_this_packet && (band_idx == 12 || band_idx >= 18) {
             // #region agent log
             eprintln!(
@@ -1125,6 +1174,30 @@ fn quant_partition_mono(
     }
     if q != 0 {
         let k = rate::get_pulses(q);
+        if packet_idx == 6 && band_idx == 8 {
+            let data = format!(
+                "{{\"packet_idx\":{},\"band\":{},\"stage\":\"nosplit_q\",\"n\":{},\"q\":{},\"k\":{},\"curr_bits\":{},\"blocks\":{},\"lm\":{},\"remaining_bits\":{},\"tell\":{}}}",
+                packet_idx,
+                band_idx,
+                n0,
+                q,
+                k,
+                curr_bits,
+                blocks,
+                lm,
+                *remaining_bits,
+                dec.tell_frac()
+            );
+            // #region agent log
+            append_anti_collapse_debug_log(
+                "run-pkt6-quant-decision-v1",
+                "H89",
+                "crates/opus-decoder/src/celt/bands.rs:quant_partition_mono",
+                "rust_pkt6_band8_qpart_nosplit_q",
+                &data,
+            );
+            // #endregion
+        }
         return vq::alg_unquant(x, k, spread, blocks, band_idx, false, dec, gain).collapse_mask as u32;
     }
 
@@ -1241,7 +1314,7 @@ pub(crate) fn quant_all_bands_mono(
         let frame_blocks = if short_blocks { m } else { 1 };
         let long_blocks = frame_blocks == 1;
         let mut b_blocks = frame_blocks;
-        let spread_eff = (spread + tf_res[i]).clamp(0, 3);
+        let spread_eff = spread.clamp(0, 3);
         let tf_change = tf_res[i];
         let mut n_b = n / b_blocks.max(1);
         let n_b_initial = n_b;
@@ -1340,6 +1413,67 @@ pub(crate) fn quant_all_bands_mono(
         } else {
             None
         };
+        if packet_idx == 6 && i == 8 {
+            let (raw_abs, raw_first8) = if let Some(lb) = lowband {
+                let abs: f32 = lb.iter().map(|v| v.abs()).sum();
+                (
+                    abs,
+                    [
+                        lb.get(0).copied().unwrap_or(0.0),
+                        lb.get(1).copied().unwrap_or(0.0),
+                        lb.get(2).copied().unwrap_or(0.0),
+                        lb.get(3).copied().unwrap_or(0.0),
+                        lb.get(4).copied().unwrap_or(0.0),
+                        lb.get(5).copied().unwrap_or(0.0),
+                        lb.get(6).copied().unwrap_or(0.0),
+                        lb.get(7).copied().unwrap_or(0.0),
+                    ],
+                )
+            } else {
+                (0.0, [0.0; 8])
+            };
+            let (prep_abs, prep_first8) = if let Some(lb) = lowband_for_quant {
+                let abs: f32 = lb.iter().map(|v| v.abs()).sum();
+                (
+                    abs,
+                    [
+                        lb.get(0).copied().unwrap_or(0.0),
+                        lb.get(1).copied().unwrap_or(0.0),
+                        lb.get(2).copied().unwrap_or(0.0),
+                        lb.get(3).copied().unwrap_or(0.0),
+                        lb.get(4).copied().unwrap_or(0.0),
+                        lb.get(5).copied().unwrap_or(0.0),
+                        lb.get(6).copied().unwrap_or(0.0),
+                        lb.get(7).copied().unwrap_or(0.0),
+                    ],
+                )
+            } else {
+                (0.0, [0.0; 8])
+            };
+            let data = format!(
+                "{{\"packet_idx\":{},\"band\":{},\"raw_lowband_abs\":{},\"raw_lowband_first8\":[{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}],\"prepared_lowband_abs\":{},\"prepared_lowband_first8\":[{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}],\"recombine\":{},\"tf_change\":{},\"frame_blocks\":{}}}",
+                packet_idx,
+                i,
+                raw_abs,
+                raw_first8[0], raw_first8[1], raw_first8[2], raw_first8[3],
+                raw_first8[4], raw_first8[5], raw_first8[6], raw_first8[7],
+                prep_abs,
+                prep_first8[0], prep_first8[1], prep_first8[2], prep_first8[3],
+                prep_first8[4], prep_first8[5], prep_first8[6], prep_first8[7],
+                recombine,
+                tf_change,
+                frame_blocks
+            );
+            // #region agent log
+            append_anti_collapse_debug_log(
+                "run-pkt6-lowband-v1",
+                "H86",
+                "crates/opus-decoder/src/celt/bands.rs:quant_all_bands_mono",
+                "rust_pkt6_band8_lowband",
+                &data,
+            );
+            // #endregion
+        }
         let tell_before = dec.tell_frac();
         let mut cm = quant_partition_mono(
             mode,
@@ -1359,6 +1493,36 @@ pub(crate) fn quant_all_bands_mono(
             packet_idx,
         );
         let cm_raw = cm;
+        if packet_idx == 6 && i == 8 {
+            let pre_post_tf_abs: f32 = x_after[..n].iter().map(|v| v.abs()).sum();
+            let data = format!(
+                "{{\"packet_idx\":{},\"band\":{},\"stage\":\"after_quant_partition_before_post_tf\",\"abs_sum\":{},\"first8\":[{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}],\"n\":{},\"b_blocks\":{},\"recombine\":{},\"time_divide\":{}}}",
+                packet_idx,
+                i,
+                pre_post_tf_abs,
+                x_after.get(0).copied().unwrap_or(0.0),
+                x_after.get(1).copied().unwrap_or(0.0),
+                x_after.get(2).copied().unwrap_or(0.0),
+                x_after.get(3).copied().unwrap_or(0.0),
+                x_after.get(4).copied().unwrap_or(0.0),
+                x_after.get(5).copied().unwrap_or(0.0),
+                x_after.get(6).copied().unwrap_or(0.0),
+                x_after.get(7).copied().unwrap_or(0.0),
+                n,
+                b_blocks,
+                recombine,
+                time_divide
+            );
+            // #region agent log
+            append_anti_collapse_debug_log(
+                "run-pkt6-quant-stage-v1",
+                "H88",
+                "crates/opus-decoder/src/celt/bands.rs:quant_all_bands_mono",
+                "rust_pkt6_band8_pre_post_tf",
+                &data,
+            );
+            // #endregion
+        }
         apply_quant_band_post_tf(
             &mut x_after[..n],
             n,
@@ -1387,6 +1551,44 @@ pub(crate) fn quant_all_bands_mono(
                 "H8",
                 "crates/opus-decoder/src/celt/bands.rs:quant_all_bands_mono",
                 "collapse_mask_post_tf_mapping",
+                &data,
+            );
+            // #endregion
+        }
+        if packet_idx == 6 {
+            let band_abs_sum: f32 = x_after[..n].iter().map(|v| v.abs()).sum();
+            let data = format!(
+                "{{\"packet_idx\":{},\"band\":{},\"n\":{},\"b\":{},\"frame_blocks\":{},\"b_blocks\":{},\"tf_change\":{},\"spread_eff\":{},\"recombine\":{},\"time_divide\":{},\"fill\":{},\"cm\":{},\"band_abs_sum\":{},\"band_first4\":[{:.9},{:.9},{:.9},{:.9}],\"band_last4\":[{:.9},{:.9},{:.9},{:.9}],\"lowband_offset\":{},\"lowband_present\":{}}}",
+                packet_idx,
+                i,
+                n,
+                b,
+                frame_blocks,
+                b_blocks,
+                tf_change,
+                spread_eff,
+                recombine,
+                time_divide,
+                fill,
+                cm,
+                band_abs_sum,
+                x_after.get(0).copied().unwrap_or(0.0),
+                x_after.get(1).copied().unwrap_or(0.0),
+                x_after.get(2).copied().unwrap_or(0.0),
+                x_after.get(3).copied().unwrap_or(0.0),
+                x_after.get(n.saturating_sub(4)).copied().unwrap_or(0.0),
+                x_after.get(n.saturating_sub(3)).copied().unwrap_or(0.0),
+                x_after.get(n.saturating_sub(2)).copied().unwrap_or(0.0),
+                x_after.get(n.saturating_sub(1)).copied().unwrap_or(0.0),
+                lowband_offset,
+                lowband_for_quant.is_some()
+            );
+            // #region agent log
+            append_anti_collapse_debug_log(
+                "run-pkt6-quant-band-v1",
+                "H85",
+                "crates/opus-decoder/src/celt/bands.rs:quant_all_bands_mono",
+                "rust_pkt6_quant_band_after",
                 &data,
             );
             // #endregion
@@ -1476,7 +1678,7 @@ pub(crate) fn quant_all_bands_stereo(
         let frame_blocks = if short_blocks { m } else { 1 };
         let long_blocks = frame_blocks == 1;
         let mut b_blocks = frame_blocks;
-        let spread_eff = (spread + tf_res[i]).clamp(0, 3);
+        let spread_eff = spread.clamp(0, 3);
         let tf_change = tf_res[i];
         let mut n_b = n / b_blocks.max(1);
         let n_b_initial = n_b;
