@@ -36,10 +36,10 @@ const TF_SELECT_TABLE: [[i8; 8]; 4] = [
     [0, -2, 0, -3, 2, 0, 1, -1],
     [0, -2, 0, -3, 3, 0, 1, -1],
 ];
-const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log";
-const DEBUG_SESSION_ID: &str = "4200c5";
-const DEBUG_RUNTIME_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-a08c80.log";
-const DEBUG_RUNTIME_SESSION_ID: &str = "a08c80";
+const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log";
+const DEBUG_SESSION_ID: &str = "bea564";
+const DEBUG_RUNTIME_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log";
+const DEBUG_RUNTIME_SESSION_ID: &str = "bea564";
 static TRACE_PACKET_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// Result of decoding one CELT frame.
@@ -522,7 +522,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -577,7 +577,7 @@ impl CeltDecoder {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
         {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -601,7 +601,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -732,7 +732,7 @@ impl CeltDecoder {
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                 {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -860,7 +860,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -897,7 +897,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -931,7 +931,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -970,6 +970,7 @@ impl CeltDecoder {
                 &mut self.rng_seed,
                 alloc.dual_stereo,
                 alloc.intensity,
+                coded_channels == 2 && self.channels == 1,
             )
         } else {
             bands::quant_all_bands_mono(
@@ -1055,7 +1056,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1103,7 +1104,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1140,7 +1141,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1176,7 +1177,7 @@ impl CeltDecoder {
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                 {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1515,6 +1516,20 @@ impl CeltDecoder {
                         sum_l_before, sum_r_before
                     );
                 }
+                if packet_idx == 2128 {
+                    let m = 1usize << lm;
+                    for i in 0..end {
+                        let s = self.mode.e_bands[i] as usize * m;
+                        let e = self.mode.e_bands[i + 1] as usize * m;
+                        let l_sum: f32 = denorm[s..e].iter().sum();
+                        let r_sum: f32 = denorm_side[s..e].iter().sum();
+                        let mono_sum: f32 = (l_sum + r_sum) * 0.5;
+                        eprintln!(
+                            "R pkt2128 band{} L={:.6} R={:.6} mono={:.6}",
+                            i, l_sum, r_sum, mono_sum
+                        );
+                    }
+                }
                 if debug_packet {
                     let data = format!(
                         "{{\"packet_idx\":{},\"sum_l_before\":{},\"sum_r_before\":{},\"frame_size_48k\":{},\"lm\":{}}}",
@@ -1575,7 +1590,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1610,7 +1625,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1696,7 +1711,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1859,7 +1874,7 @@ impl CeltDecoder {
                     if let Ok(mut f) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                     {
                         let ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -2018,7 +2033,7 @@ impl CeltDecoder {
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                 {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2063,7 +2078,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2173,7 +2188,7 @@ impl CeltDecoder {
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                 {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2314,7 +2329,7 @@ impl CeltDecoder {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2364,12 +2379,28 @@ impl CeltDecoder {
                 }
                 first8_csv.push_str(&format!("{:.6}", x));
             }
+            let post_s163 = if frame_size_48k > 163 {
+                post_comb[163]
+            } else {
+                0.0
+            };
+            let mut post_win_160_170_csv = String::new();
+            if frame_size_48k > 170 {
+                for i in 160..=170 {
+                    if !post_win_160_170_csv.is_empty() {
+                        post_win_160_170_csv.push(';');
+                    }
+                    post_win_160_170_csv.push_str(&format!("{}:{:.6}", i, post_comb[i]));
+                }
+            }
             let data = format!(
-                "{{\"packet_idx\":{},\"disable_comb_filter\":{},\"post_comb_abs\":{},\"post_comb_first8_csv\":\"{}\",\"pf_period_old_in\":{},\"pf_period_in\":{},\"pf_period_old_out\":{},\"pf_period_out\":{},\"pf_gain_old_out\":{},\"pf_gain_out\":{},\"pf_tapset_old_out\":{},\"pf_tapset_out\":{}}}",
+                "{{\"packet_idx\":{},\"disable_comb_filter\":{},\"post_comb_abs\":{},\"post_comb_first8_csv\":\"{}\",\"post_comb_s163\":{},\"post_comb_160_170_csv\":\"{}\",\"pf_period_old_in\":{},\"pf_period_in\":{},\"pf_period_old_out\":{},\"pf_period_out\":{},\"pf_gain_old_out\":{},\"pf_gain_out\":{},\"pf_tapset_old_out\":{},\"pf_tapset_out\":{}}}",
                 packet_idx,
                 disable_comb_filter,
                 post_comb_abs,
                 first8_csv,
+                post_s163,
+                post_win_160_170_csv,
                 pf_period_old,
                 pf_period,
                 self.postfilter_period_old,
@@ -2381,8 +2412,8 @@ impl CeltDecoder {
             );
             // #region agent log
             Self::append_debug_log(
-                "run-onset-map-v1",
-                "H4",
+                "run-onset-map-v2",
+                "H2",
                 "crates/opus-decoder/src/celt/mod.rs:decode_frame",
                 "post_comb_and_pf_state",
                 &data,
@@ -2567,7 +2598,7 @@ impl CeltDecoder {
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                 {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
