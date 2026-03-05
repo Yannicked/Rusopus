@@ -2,6 +2,7 @@
 
 ## 2026-03-04
 
+- milestone: CELT mono decode passes RFC 8251 conformance (`testvector07`): `4186/4186` `final_range` bit-exact, `opus_compare` quality `98.1%` (`err=0.004610`), mono and stereo-coded packets decode correctly in mono output mode.
 - feat(celt): unified decode_mem buffer, mono synthesis bit-exact. Restructured CELT synthesis to use single contiguous `decode_mem[2048+120]` matching libopus. Overlap, comb filter history, and IMDCT output share one buffer. testvector07 mono section (pkt 0–2127): max_delta=1 (float rounding only). Remaining error is entirely in stereo-coded section (pkt 2128+).
 - fix(celt): aligned stereo collapse-mask TF mapping and stereo merge with libopus (`stereo_merge` side scaling semantics). Also fixed stereo N=1 lowband history propagation. `testvector07` vs live C: no `DELTA pkt` entries above threshold in conformance trace.
 

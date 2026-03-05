@@ -418,15 +418,12 @@ This logic should live in a separate crate or CLI/tooling layer (not in the core
   - crafted packets causing pathological CPU
   - avoid unbounded loops and allocations; enforce spec limits
 
-## Next step (2026-02-22)
+## Next step (2026-03-05)
 
-Immediate vertical slice progression:
+Immediate follow-up task (Phase 2 closure: stereo output):
 
-- Complete Phase 0 `final_range` comparison in `tests/conformance_rfc.rs` (existing TODO).
-- Finish Phase 2 CELT essentials needed for first passing CELT-only vector:
-  - `rate.c` allocation path
-  - `quant_bands.c` coarse/fine/fill passes
-  - transient short-block path
-  - postfilter + deemphasis
-- Start Phase 3a scaffolding (`silk/` module, frame header parse with LBRR consumption, multi-frame packet support) before SILK synthesis internals.
-- Keep focused vector runs with `OPUS_VECTOR=...` and add optional C-vs-Rust differential checks for newly completed decode paths.
+- Add dual-channel IMDCT routing (`L` and `R` paths instead of stereo->mono downmix before synthesis).
+- Replace single `decode_mem[2048+120]` with per-channel state (`decode_mem[2][2048+120]`).
+- Run comb filter and deemphasis per output channel.
+- Write interleaved stereo output (`out[i*2]=L[i]`, `out[i*2+1]=R[i]`).
+- Validate on `testvector01`, `testvector10`, `testvector11` with `opus_compare` quality gate.
