@@ -84,7 +84,9 @@ fn exp_rotation(x: &mut [f32], dir: i32, stride: usize, k: i32, spread: i32) {
 /// Params: signed pulses, output vector and synthesis gain.
 /// Returns: sum of squared pulses.
 fn normalise_residual(iy: &[i32], x: &mut [f32], gain: f32) -> u32 {
-    let ryy = iy.iter().fold(0u32, |acc, &v| acc.wrapping_add((v * v) as u32));
+    let ryy = iy
+        .iter()
+        .fold(0u32, |acc, &v| acc.wrapping_add((v * v) as u32));
     let scale = if ryy == 0 {
         0.0
     } else {
@@ -135,16 +137,22 @@ pub(crate) fn alg_unquant(
     let decoded = cwrs::decode_pulses(dec, x.len(), k as usize);
     normalise_residual(&decoded.pulses, x, gain);
     if trace_packet && band == 6 && x.len() >= 4 {
-        eprintln!(
+        debug_trace!(
             "band6 pre_rot:  {:.6} {:.6} {:.6} {:.6}",
-            x[0], x[1], x[2], x[3]
+            x[0],
+            x[1],
+            x[2],
+            x[3]
         );
     }
     exp_rotation(x, -1, b.max(1), k, spread);
     if trace_packet && band == 6 && x.len() >= 4 {
-        eprintln!(
+        debug_trace!(
             "band6 post_rot: {:.6} {:.6} {:.6} {:.6}",
-            x[0], x[1], x[2], x[3]
+            x[0],
+            x[1],
+            x[2],
+            x[3]
         );
     }
     PvqDecodeInfo {
@@ -165,4 +173,3 @@ pub(crate) fn renormalise_vector(x: &mut [f32], gain: f32) {
         *v *= g;
     }
 }
-

@@ -43,7 +43,11 @@ pub(crate) fn bits2pulses(mode: &CeltMode, band: usize, lm: i32, bits: i32) -> i
             lo = mid;
         }
     }
-    let lo_bits = if lo == 0 { -1 } else { cache[lo as usize] as i32 };
+    let lo_bits = if lo == 0 {
+        -1
+    } else {
+        cache[lo as usize] as i32
+    };
     if target - lo_bits <= cache[hi as usize] as i32 - target {
         lo
     } else {
@@ -111,7 +115,11 @@ pub(crate) fn clt_compute_allocation(
     dec: &mut EcDec<'_>,
 ) -> AllocationResult {
     let mut total_bits = total.max(0);
-    let skip_rsv = if total_bits >= (1 << BITRES) { 1 << BITRES } else { 0 };
+    let skip_rsv = if total_bits >= (1 << BITRES) {
+        1 << BITRES
+    } else {
+        0
+    };
     total_bits -= skip_rsv;
 
     let mut intensity_rsv = 0i32;
@@ -122,7 +130,11 @@ pub(crate) fn clt_compute_allocation(
             intensity_rsv = 0;
         } else {
             total_bits -= intensity_rsv;
-            dual_stereo_rsv = if total_bits >= (1 << BITRES) { 1 << BITRES } else { 0 };
+            dual_stereo_rsv = if total_bits >= (1 << BITRES) {
+                1 << BITRES
+            } else {
+                0
+            };
             total_bits -= dual_stereo_rsv;
         }
     }
@@ -155,7 +167,8 @@ pub(crate) fn clt_compute_allocation(
         let mid = (lo + hi) >> 1;
         for j in (start..end).rev() {
             let n = (mode.e_bands[j + 1] - mode.e_bands[j]) as i32;
-            let mut bits_j = c * n * ((mode.alloc_vectors[mid as usize * len + j] as i32) << lm) >> 2;
+            let mut bits_j =
+                c * n * ((mode.alloc_vectors[mid as usize * len + j] as i32) << lm) >> 2;
             if bits_j > 0 {
                 bits_j = (bits_j + trim_offset[j]).max(0);
             }
@@ -269,7 +282,7 @@ fn interp_bits2pulses(
     lm: usize,
     dec: &mut EcDec<'_>,
 ) -> (usize, i32) {
-    let trace_packet0 = std::env::var("OPUS_TRACE_PACKET0").ok().as_deref() == Some("1");
+    let trace_packet0 = false;
     let c = channels as i32;
     let stereo = channels > 1;
     let alloc_floor = c << BITRES;
@@ -339,7 +352,11 @@ fn interp_bits2pulses(
             intensity_rsv = LOG2_FRAC_TABLE[j - start] as i32;
         }
         psum += intensity_rsv;
-        bits[j] = if band_bits >= alloc_floor { alloc_floor } else { 0 };
+        bits[j] = if band_bits >= alloc_floor {
+            alloc_floor
+        } else {
+            0
+        };
         psum += bits[j];
         coded_bands -= 1;
     }
@@ -360,9 +377,11 @@ fn interp_bits2pulses(
         *dual_stereo = 0;
     }
     if trace_packet0 {
-        eprintln!(
+        debug_trace!(
             "[RUST] alloc: coded_bands={} psum={} total_adj={}",
-            coded_bands, psum, total_adj
+            coded_bands,
+            psum,
+            total_adj
         );
     }
 
@@ -387,7 +406,12 @@ fn interp_bits2pulses(
         if n > 1 {
             excess = (bit - cap[j]).max(0);
             bits[j] = bit - excess;
-            let den = c * n + if channels == 2 && n > 2 && *dual_stereo == 0 && j < *intensity as usize { 1 } else { 0 };
+            let den = c * n
+                + if channels == 2 && n > 2 && *dual_stereo == 0 && j < *intensity as usize {
+                    1
+                } else {
+                    0
+                };
             let nclogn = den * (mode.log_n[j] as i32 + log_m);
             let mut offset = (nclogn >> 1) - den * FINE_OFFSET;
             if n == 2 {
@@ -414,7 +438,8 @@ fn interp_bits2pulses(
             fine_priority[j] = 1;
         }
         if excess > 0 {
-            let extra_fine = ((excess >> (stereo_shift + BITRES)).max(0)).min(MAX_FINE_BITS - ebits[j]);
+            let extra_fine =
+                ((excess >> (stereo_shift + BITRES)).max(0)).min(MAX_FINE_BITS - ebits[j]);
             ebits[j] += extra_fine;
             let extra_bits = (extra_fine * c) << BITRES;
             fine_priority[j] = i32::from(extra_bits >= excess - balance);
@@ -429,4 +454,3 @@ fn interp_bits2pulses(
     }
     (coded_bands, balance)
 }
-

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-03-05
+
+- checkpoint(pre-silk): removed decoder debug instrumentation in `opus-decoder` (`eprintln`, `OPUS_TRACE_*`, `OPUS_DISABLE_*`); kept only `OPUS_TRACE_PACKET_MAX_DELTA` in `conformance_rfc`.
+- chore(lint): ran `cargo clippy -p opus-decoder --all-targets`; removed dead transient debug API, removed unused `CeltMode` metadata fields (`fs`, `eff_ebands`, `max_lm`, `nb_short_mdcts`), and removed unused `Complex32` import in MDCT path.
+
 ## 2026-03-04
 
 - milestone: CELT mono decode passes RFC 8251 conformance (`testvector07`): `4186/4186` `final_range` bit-exact, `opus_compare` quality `98.1%` (`err=0.004610`), mono and stereo-coded packets decode correctly in mono output mode.

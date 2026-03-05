@@ -4,12 +4,26 @@
 //! stages with RFC conformance vectors as the primary gate.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::erasing_op,
+    clippy::identity_op,
+    clippy::precedence,
+    clippy::int_plus_one
+)]
 
-mod error;
+macro_rules! debug_trace {
+    ($($arg:tt)*) => {{
+        if false {
+            std::eprintln!($($arg)*);
+        }
+    }};
+}
+
 mod celt;
-mod entropy;
-mod packet;
 pub mod compare;
+mod entropy;
+mod error;
+mod packet;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use error::Error;
@@ -22,7 +36,6 @@ pub struct Decoder {
     channels: u8,
     celt: celt::CeltDecoder,
     last_packet_split_count: usize,
-    last_packet_is_transient: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +60,6 @@ impl Decoder {
             channels,
             celt: celt::CeltDecoder::new(fs_hz, channels),
             last_packet_split_count: 0,
-            last_packet_is_transient: false,
         })
     }
 
@@ -76,7 +88,6 @@ impl Decoder {
         // Placeholder. The real implementation will reset SILK/CELT state.
         self.celt.reset();
         self.last_packet_split_count = 0;
-        self.last_packet_is_transient = false;
     }
 
     /// Return range coder final state for conformance comparison.
@@ -89,13 +100,6 @@ impl Decoder {
     /// This is a debug metric used for CELT split-path diagnostics.
     pub fn last_split_count(&self) -> usize {
         self.last_packet_split_count
-    }
-
-    /// Return transient flag from the last decoded CELT frame.
-    ///
-    /// This is a debug metric used for synthesis-path diagnostics.
-    pub fn last_is_transient(&self) -> bool {
-        self.last_packet_is_transient
     }
 
     /// Return deemphasis memory for channel 0 (debug metric).
@@ -112,9 +116,7 @@ impl Decoder {
     /// - Returns the number of samples per channel written.
     pub fn decode(&mut self, packet: Option<&[u8]>, out: &mut [i16]) -> Result<usize, Error> {
         let packet_idx = TRACE_DECODE_PACKET_IDX.fetch_add(1, Ordering::SeqCst);
-        let trace_packet_idx = std::env::var("OPUS_TRACE_PACKET_IDX")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
+        let trace_packet_idx = None;
         let (toc, samples_per_channel_needed) = match packet {
             Some(packet) => {
                 let pp = packet::parse_packet(packet)?;
@@ -143,7 +145,54 @@ impl Decoder {
             16..=31 => OpusMode::CeltOnly,
             _ => unreachable!(),
         };
+        let mode_name = match mode {
+            OpusMode::SilkOnly => "silk",
+            OpusMode::Hybrid => "hybrid",
+            OpusMode::CeltOnly => "celt",
+        };
+        // #region agent log
+        let log_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".cursor")
+            .join("debug-bea564.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"sessionId\":\"bea564\",\"runId\":\"run-tv01-tv10-debug1\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:mode_gate\",\"message\":\"decoder_mode_gate\",\"data\":{{\"packet_idx\":{},\"toc\":{},\"config\":{},\"mode\":\"{}\",\"decoder_channels\":{},\"samples_per_channel_needed\":{}}},\"timestamp\":{}}}\n",
+                packet_idx, toc, config, mode_name, self.channels, samples_per_channel_needed, ts
+            );
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        // #endregion
         if mode != OpusMode::CeltOnly {
+            // #region agent log
+            let log_path = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".cursor")
+                .join("debug-bea564.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+            {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let line = format!(
+                    "{{\"sessionId\":\"bea564\",\"runId\":\"run-tv01-tv10-debug1\",\"hypothesisId\":\"H4\",\"location\":\"crates/opus-decoder/src/lib.rs:mode_gate\",\"message\":\"decoder_mode_not_supported\",\"data\":{{\"packet_idx\":{},\"config\":{},\"mode\":\"{}\"}},\"timestamp\":{}}}\n",
+                    packet_idx, config, mode_name, ts
+                );
+                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+            }
+            // #endregion
             return Err(Error::NotImplemented);
         }
 
@@ -162,36 +211,28 @@ impl Decoder {
                     .unwrap_or(0);
                 let line = format!(
                     "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:151\",\"message\":\"packet_vs_decoder_channels\",\"data\":{{\"packet_idx\":{},\"packet_channels\":{},\"decoder_channels\":{},\"toc\":{},\"config\":{}}},\"timestamp\":{}}}\n",
-                    packet_idx,
-                    pp.packet_channels,
-                    self.channels,
-                    pp.toc,
-                    config,
-                    ts
+                    packet_idx, pp.packet_channels, self.channels, pp.toc, config, ts
                 );
                 let _ = std::io::Write::write_all(&mut f, line.as_bytes());
             }
             // #endregion
         }
         self.last_packet_split_count = 0;
-        self.last_packet_is_transient = false;
 
         let mut written_per_channel = 0usize;
         for frame in pp.frames() {
             // CELT frame sizes are specified in 48 kHz samples; this is enough
             // to drive the CELT-side LM selection.
             let frame_samples_48k = pp.samples_per_frame_48k;
-            let frame = self
-                .celt
-                .decode_frame(
-                    frame,
-                    frame_samples_48k,
-                    config,
-                    pp.packet_channels,
-                    &mut out[written_per_channel * self.channels as usize..],
-                )?;
+            let frame = self.celt.decode_frame(
+                frame,
+                frame_samples_48k,
+                config,
+                pp.packet_channels,
+                packet_idx,
+                &mut out[written_per_channel * self.channels as usize..],
+            )?;
             self.last_packet_split_count += self.celt.last_split_count();
-            self.last_packet_is_transient = frame.is_transient;
             written_per_channel += frame.samples_per_channel;
         }
 
