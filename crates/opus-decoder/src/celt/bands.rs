@@ -395,6 +395,31 @@ fn post_tf_collapse_mask(mut cm: u32, b0: usize, recombine: usize, time_divide: 
     }
 }
 
+/// Transform fill mask through TF recombine/time-divide steps.
+///
+/// Params: pre-TF fill mask, original block count, and TF context.
+/// Returns: fill mask mapped to quant-partition block layout.
+fn transform_fill_for_quant(
+    mut fill: u32,
+    mut blocks_orig: usize,
+    recombine: usize,
+    time_divide: usize,
+) -> u32 {
+    for _ in 0..recombine {
+        let lo = (fill & 0x0F) as usize;
+        let hi = ((fill >> 4) & 0x0F) as usize;
+        fill = BIT_INTERLEAVE_TABLE[lo] | (BIT_INTERLEAVE_TABLE[hi] << 2);
+    }
+    for _ in 0..time_divide {
+        if blocks_orig == 0 {
+            break;
+        }
+        fill |= fill << blocks_orig;
+        blocks_orig <<= 1;
+    }
+    fill
+}
+
 /// Prepare lowband reference for decode-time folding under TF transforms.
 ///
 /// Params: lowband slice and TF transform context.
@@ -466,19 +491,16 @@ fn special_hybrid_folding_decode(
 
 /// Merge decoded stereo mid/side vectors back to left/right.
 ///
-/// Matches libopus bands.c: L = mid*X - side*Y, R = mid*X + side*Y (for N==2);
-/// for N>2 we apply per-channel energy normalization (el, er) to preserve norm.
-///
-/// Params: mutable mid (x) and side (y) vectors, decoded mid and side gains.
-/// Returns: nothing; x = left, y = right (in-place).
-fn stereo_merge_float(x: &mut [f32], y: &mut [f32], mid: f32, side: f32) {
+/// Matches libopus `stereo_merge()`: `x` is unscaled mid, `y` is already side-scaled.
+/// Params: mutable mid/side vectors and decoded mid gain.
+/// Returns: nothing; `x` and `y` become left/right channels.
+fn stereo_merge_float(x: &mut [f32], y: &mut [f32], mid: f32) {
     let xp = x.iter()
         .zip(y.iter())
         .map(|(a, b)| a * b)
         .sum::<f32>()
-        * mid
-        * side;
-    let side_energy = y.iter().map(|v| v * v).sum::<f32>() * side * side;
+        * mid;
+    let side_energy = y.iter().map(|v| v * v).sum::<f32>();
     let el = mid * mid + side_energy - 2.0 * xp;
     let er = mid * mid + side_energy + 2.0 * xp;
     if er < 6.0e-4 || el < 6.0e-4 {
@@ -488,8 +510,8 @@ fn stereo_merge_float(x: &mut [f32], y: &mut [f32], mid: f32, side: f32) {
     let lgain = 1.0 / el.sqrt();
     let rgain = 1.0 / er.sqrt();
     for i in 0..x.len() {
-        let l = mid * x[i] - side * y[i];
-        let r = mid * x[i] + side * y[i];
+        let l = mid * x[i] - y[i];
+        let r = mid * x[i] + y[i];
         x[i] = lgain * l;
         y[i] = rgain * r;
     }
@@ -677,7 +699,8 @@ fn quant_band_stereo_decode(
     y: &mut [f32],
     band_idx: usize,
     mut b: i32,
-    blocks: usize,
+    blocks_quant: usize,
+    blocks_orig: usize,
     lowband_x: Option<&[f32]>,
     lm: i32,
     mut fill: u32,
@@ -708,6 +731,12 @@ fn quant_band_stereo_decode(
         };
         decode_sign(&mut x[0]);
         decode_sign(&mut y[0]);
+        if let Some(dst) = mid_history_out.as_deref_mut()
+            && !dst.is_empty()
+        {
+            // Match libopus quant_band_n1(): preserve X[0] as lowband history.
+            dst[0] = x[0];
+        }
         return 1;
     }
 
@@ -717,8 +746,8 @@ fn quant_band_stereo_decode(
         dec,
         n,
         &mut b,
-        blocks,
-        blocks,
+        blocks_orig,
+        blocks_orig,
         lm,
         &mut fill,
         intensity,
@@ -752,6 +781,14 @@ fn quant_band_stereo_decode(
         );
         // #endregion
     }
+    let fill_mid = transform_fill_for_quant(fill, blocks_orig, recombine, time_divide);
+    let fill_side_seed = if blocks_orig >= 32 {
+        0
+    } else {
+        fill >> blocks_orig
+    };
+    let fill_side = transform_fill_for_quant(fill_side_seed, blocks_orig, recombine, time_divide);
+    let orig_fill_mid = transform_fill_for_quant(orig_fill, blocks_orig, recombine, time_divide);
 
     if n == 2 {
         let mut mbits = b;
@@ -772,11 +809,11 @@ fn quant_band_stereo_decode(
                 y,
                 band_idx,
                 mbits,
-                blocks,
+                blocks_quant,
                 lowband_x,
                 lm,
                 1.0,
-                orig_fill,
+                orig_fill_mid,
                 spread,
                 dec,
                 seed,
@@ -784,7 +821,7 @@ fn quant_band_stereo_decode(
                 trace_this_packet,
                 packet_idx,
             );
-            apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
+            apply_quant_band_post_tf(y, n, blocks_quant, recombine, time_divide, long_blocks);
             x[0] = -(sign as f32) * y[1];
             x[1] = (sign as f32) * y[0];
             if let Some(dst) = mid_history_out.as_deref_mut() {
@@ -805,18 +842,18 @@ fn quant_band_stereo_decode(
                 y[0] = -y[0];
                 y[1] = -y[1];
             }
-            return post_tf_collapse_mask(cm, blocks, recombine, time_divide);
+            return post_tf_collapse_mask(cm, blocks_quant, recombine, time_divide);
         }
         let cm = quant_partition_mono(
             mode,
             x,
             band_idx,
             mbits,
-            blocks,
+            blocks_quant,
             lowband_x,
             lm,
             1.0,
-            orig_fill,
+            orig_fill_mid,
             spread,
             dec,
             seed,
@@ -824,7 +861,7 @@ fn quant_band_stereo_decode(
             trace_this_packet,
             packet_idx,
         );
-        apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(x, n, blocks_quant, recombine, time_divide, long_blocks);
         if let Some(dst) = mid_history_out.as_deref_mut() {
             let scale = (n as f32).sqrt();
             for (d, s) in dst.iter_mut().zip(x.iter()) {
@@ -845,7 +882,7 @@ fn quant_band_stereo_decode(
             y[0] = -y[0];
             y[1] = -y[1];
         }
-        return post_tf_collapse_mask(cm, blocks, recombine, time_divide);
+        return post_tf_collapse_mask(cm, blocks_quant, recombine, time_divide);
     }
 
     let mut mbits = 0.max(b.min((b - delta) / 2));
@@ -866,11 +903,11 @@ fn quant_band_stereo_decode(
             x,
             band_idx,
             mbits,
-            blocks,
+            blocks_quant,
             lowband_x,
             lm,
             1.0,
-            fill,
+            fill_mid,
             spread,
             dec,
             seed,
@@ -887,11 +924,11 @@ fn quant_band_stereo_decode(
             y,
             band_idx,
             sbits,
-            blocks,
+            blocks_quant,
             None,
             lm,
             side_gain,
-            fill >> blocks,
+            fill_side,
             spread,
             dec,
             seed,
@@ -899,8 +936,8 @@ fn quant_band_stereo_decode(
             trace_this_packet,
             packet_idx,
         );
-        apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
-        apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(x, n, blocks_quant, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(y, n, blocks_quant, recombine, time_divide, long_blocks);
         cm
     } else {
         let mut cm = quant_partition_mono(
@@ -908,11 +945,11 @@ fn quant_band_stereo_decode(
             y,
             band_idx,
             sbits,
-            blocks,
+            blocks_quant,
             None,
             lm,
             side_gain,
-            fill >> blocks,
+            fill_side,
             spread,
             dec,
             seed,
@@ -929,11 +966,11 @@ fn quant_band_stereo_decode(
             x,
             band_idx,
             mbits,
-            blocks,
+            blocks_quant,
             lowband_x,
             lm,
             1.0,
-            fill,
+            fill_mid,
             spread,
             dec,
             seed,
@@ -941,8 +978,8 @@ fn quant_band_stereo_decode(
             trace_this_packet,
             packet_idx,
         );
-        apply_quant_band_post_tf(x, n, blocks, recombine, time_divide, long_blocks);
-        apply_quant_band_post_tf(y, n, blocks, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(x, n, blocks_quant, recombine, time_divide, long_blocks);
+        apply_quant_band_post_tf(y, n, blocks_quant, recombine, time_divide, long_blocks);
         cm
     };
     if let Some(dst) = mid_history_out.as_deref_mut() {
@@ -951,13 +988,13 @@ fn quant_band_stereo_decode(
             *d = *s * scale;
         }
     }
-    stereo_merge_float(x, y, mid_gain, side_gain);
+    stereo_merge_float(x, y, mid_gain);
     if inv {
         for v in y.iter_mut() {
             *v = -*v;
         }
     }
-    post_tf_collapse_mask(cm, blocks, recombine, time_divide)
+    post_tf_collapse_mask(cm, blocks_quant, recombine, time_divide)
 }
 
 /// Decode one mono partition with recursive split.
@@ -1799,7 +1836,8 @@ pub(crate) fn quant_all_bands_stereo(
             }
         }
 
-        let mut fill = x_cm | y_cm;
+        let fill_theta = x_cm | y_cm;
+        let mut fill = fill_theta;
         let mut fill_x = x_cm;
         let mut fill_y = y_cm;
         let recombine = tf_change.max(0) as usize;
@@ -1908,7 +1946,7 @@ pub(crate) fn quant_all_bands_stereo(
         let mut remaining_band_bits = remaining_bits;
         let tell_before = dec.tell_frac();
         let (cm_l, cm_r) = if dual_stereo_on {
-            let cmx = quant_partition_mono(
+            let cmx_raw = quant_partition_mono(
                 mode,
                 &mut x_after[..n],
                 i,
@@ -1925,7 +1963,7 @@ pub(crate) fn quant_all_bands_stereo(
                 trace_this_packet,
                 packet_idx,
             );
-            let cmy = quant_partition_mono(
+            let cmy_raw = quant_partition_mono(
                 mode,
                 &mut y_after[..n],
                 i,
@@ -1958,6 +1996,8 @@ pub(crate) fn quant_all_bands_stereo(
                 time_divide,
                 long_blocks,
             );
+            let cmx = post_tf_collapse_mask(cmx_raw, b_blocks, recombine, time_divide);
+            let cmy = post_tf_collapse_mask(cmy_raw, b_blocks, recombine, time_divide);
             if i + 1 < end {
                 let scale = (n as f32).sqrt();
                 for j in 0..n {
@@ -1975,9 +2015,10 @@ pub(crate) fn quant_all_bands_stereo(
                 i,
                 b,
                 b_blocks,
+                frame_blocks,
                 lowband_x_for_quant.as_deref(),
                 lm as i32,
-                fill,
+                fill_theta,
                 spread_eff,
                 disable_inv,
                 dec,
