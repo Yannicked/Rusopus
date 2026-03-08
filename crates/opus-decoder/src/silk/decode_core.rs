@@ -248,7 +248,6 @@ pub(super) fn decode_core(
                 trace.pcm_head[i] = pcm;
             }
         }
-
         s_lpc_q14.copy_within(subfr_length..subfr_length + MAX_LPC_ORDER, 0);
     }
 
@@ -287,7 +286,7 @@ fn smulww(a32: i32, b32: i32) -> i32 {
 /// Params: accumulator `a32`, multiplicand `b32`, and signed `c32`.
 /// Returns: accumulated high-word product.
 fn smlawb(a32: i32, b32: i32, c32: i32) -> i32 {
-    a32.saturating_add(((b32 as i64 * (c32 as i16 as i64)) >> 16) as i32)
+    a32.wrapping_add(smulwb(b32, c32))
 }
 
 /// Saturating 32-bit addition.
@@ -370,5 +369,8 @@ fn smulbb(a32: i32, b32: i32) -> i32 {
 /// Params: signed `a32` and signed `b32`.
 /// Returns: high-word signed product.
 fn smulwb(a32: i32, b32: i32) -> i32 {
-    ((a32 as i64 * (b32 as i16 as i64)) >> 16) as i32
+    let b16 = b32 as i16 as i32;
+    let high = (a32 >> 16) * b16;
+    let low = ((a32 & 0xFFFF) * b16) >> 16;
+    high.wrapping_add(low)
 }

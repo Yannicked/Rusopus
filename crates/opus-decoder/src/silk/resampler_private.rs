@@ -106,7 +106,10 @@ pub(super) const fn fir_history_len() -> usize {
 /// Params: signed `a32` and signed `b32`.
 /// Returns: high-word product.
 fn smulwb(a32: i32, b32: i32) -> i32 {
-    ((a32 as i64 * (b32 as i16 as i64)) >> 16) as i32
+    let b16 = b32 as i16 as i32;
+    let high = (a32 >> 16) * b16;
+    let low = ((a32 & 0xFFFF) * b16) >> 16;
+    high.wrapping_add(low)
 }
 
 /// Multiply signed low halves and accumulate.
@@ -122,7 +125,7 @@ fn smlabb(a32: i32, b32: i32, c32: i32) -> i32 {
 /// Params: accumulator `a32`, multiplicand `b32`, and signed `c32`.
 /// Returns: accumulated high-word product.
 fn smlawb(a32: i32, b32: i32, c32: i32) -> i32 {
-    a32 + ((b32 as i64 * (c32 as i16 as i64)) >> 16) as i32
+    a32.wrapping_add(smulwb(b32, c32))
 }
 
 /// Multiply signed low halves.
