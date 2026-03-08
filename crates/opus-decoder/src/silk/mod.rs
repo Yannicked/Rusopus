@@ -14,11 +14,15 @@ mod lpc;
 mod ltp;
 mod nlsf;
 mod pitch;
+mod resampler;
+mod resampler_private;
+mod resampler_rom;
 mod stereo;
 mod tables;
 
 const MAX_INTERNAL_FRAMES: usize = 3;
 const MAX_LPC_HALVES: usize = 2;
+const MAX_API_FRAME_SAMPLES_48K: usize = 960 * MAX_INTERNAL_FRAMES;
 
 /// Result of decoding one SILK Opus frame.
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +50,7 @@ pub(crate) struct SilkDecoder {
     final_range: u32,
     lbrr_state: [lbrr::ChannelState; 2],
     core_state: [decode_core::SilkChannelState; 2],
+    resampler_state: [Option<resampler::SilkResampler>; 2],
     prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
     pred_coef_q12:
         [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
@@ -68,6 +73,7 @@ impl SilkDecoder {
                 decode_core::SilkChannelState::default(),
                 decode_core::SilkChannelState::default(),
             ],
+            resampler_state: [None, None],
             prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
             pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
             first_frame_after_reset: [true; 2],
@@ -86,6 +92,7 @@ impl SilkDecoder {
             decode_core::SilkChannelState::default(),
             decode_core::SilkChannelState::default(),
         ];
+        self.resampler_state = [None, None];
         self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
         self.pred_coef_q12 = [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
         self.first_frame_after_reset = [true; 2];
@@ -105,7 +112,7 @@ impl SilkDecoder {
     /// Params: `frame` payload bytes, `frame_samples_48k` frame duration in 48 kHz samples,
     /// `config` TOC config, `packet_channels` coded channels, `_packet_idx` debug packet index,
     /// and `out` interleaved output slice.
-    /// Returns: decoded sample count per output channel (audio is zero-filled in Phase 3a).
+    /// Returns: decoded sample count per output channel at the API output rate.
     pub fn decode_frame(
         &mut self,
         frame: &[u8],
@@ -133,12 +140,24 @@ impl SilkDecoder {
 
         let mut dec = EcDec::new(frame);
         let mut internal_pcm = [[0i16; MAX_INTERNAL_FRAMES * tables::MAX_FRAME_LENGTH]; 2];
+        let mut resampled_pcm = [[0i16; MAX_API_FRAME_SAMPLES_48K]; 2];
         let trace_pkt0 = packet_idx == 0 && silk_trace_enabled();
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "init");
         }
         for state in self.lbrr_state.iter_mut().take(packet_channels as usize) {
             lbrr::configure_channel_state(state, internal_fs_hz / 1000, nb_subfr);
+        }
+        if self.fs_hz == 48_000 {
+            for ch in 0..packet_channels as usize {
+                let needs_reset = self.resampler_state[ch]
+                    .as_ref()
+                    .is_none_or(|state| !state.matches(internal_fs_hz, self.fs_hz));
+                if needs_reset {
+                    self.resampler_state[ch] =
+                        Some(resampler::SilkResampler::new(internal_fs_hz, self.fs_hz)?);
+                }
+            }
         }
         let parsed = parse_header(
             &mut dec,
@@ -182,19 +201,50 @@ impl SilkDecoder {
 
         out[..needed].fill(0);
         let internal_samples_per_channel = internal_frames * frame_length;
-        for n in 0..internal_samples_per_channel.min(samples_per_channel) {
-            let left = internal_pcm[0][n];
-            match self.channels {
-                1 => out[n] = left,
-                2 => {
-                    out[2 * n] = left;
-                    out[2 * n + 1] = if packet_channels == 2 {
-                        internal_pcm[1][n]
-                    } else {
-                        left
-                    };
+        if self.fs_hz == 48_000 {
+            for ch in 0..packet_channels as usize {
+                if let Some(resampler) = self.resampler_state[ch].as_mut() {
+                    let expected = resampler.output_len(internal_samples_per_channel);
+                    debug_assert_eq!(expected, samples_per_channel);
+                    let written = resampler.process(
+                        &internal_pcm[ch][..internal_samples_per_channel],
+                        &mut resampled_pcm[ch][..samples_per_channel],
+                    );
+                    debug_assert_eq!(written, samples_per_channel);
                 }
-                _ => unreachable!(),
+            }
+        }
+        if self.fs_hz == 48_000 {
+            for n in 0..samples_per_channel {
+                let left = resampled_pcm[0][n];
+                match self.channels {
+                    1 => out[n] = left,
+                    2 => {
+                        out[2 * n] = left;
+                        out[2 * n + 1] = if packet_channels == 2 {
+                            resampled_pcm[1][n]
+                        } else {
+                            left
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            for n in 0..internal_samples_per_channel.min(samples_per_channel) {
+                let left = internal_pcm[0][n];
+                match self.channels {
+                    1 => out[n] = left,
+                    2 => {
+                        out[2 * n] = left;
+                        out[2 * n + 1] = if packet_channels == 2 {
+                            internal_pcm[1][n]
+                        } else {
+                            left
+                        };
+                    }
+                    _ => unreachable!(),
+                }
             }
         }
 
