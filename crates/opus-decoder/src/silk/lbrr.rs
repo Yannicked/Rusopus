@@ -4,6 +4,7 @@ use crate::Error;
 use crate::entropy::EcDec;
 
 use super::entropy_tables;
+use super::tables;
 
 const MAX_INTERNAL_FRAMES: usize = 3;
 const MAX_NB_SUBFR: usize = 4;
@@ -42,6 +43,17 @@ pub(super) struct DecodedSideInfo {
     pub signal_type: i32,
     /// Quantizer offset type.
     pub quant_offset_type: i32,
+    /// Decoded NLSF quantization path for Phase 3b.
+    pub nlsf: DecodedNlsfIndices,
+}
+
+/// Stored SILK NLSF indices (stage1 plus stage2 residuals).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DecodedNlsfIndices {
+    /// Packed indices as `[I1, res0, ..., res(order-1)]`.
+    pub values: [i8; tables::MAX_LPC_ORDER + 1],
+    /// Decoded interpolation factor in Q2.
+    pub interp_coef_q2: i8,
 }
 
 /// Configure channel-state decode context for current SILK frame shape.
@@ -89,20 +101,24 @@ pub(super) fn decode_indices(
     if cb1_index >= cb.n_vectors {
         return Err(Error::BadPacket);
     }
+    let mut nlsf_indices = [0i8; tables::MAX_LPC_ORDER + 1];
+    nlsf_indices[0] = cb1_index as i8;
 
     let mut ec_ix = [0usize; 16];
     unpack_nlsf_ec_ix(&mut ec_ix, cb, cb1_index)?;
-    for &row in ec_ix.iter().take(cb.order) {
+    for (i, &row) in ec_ix.iter().take(cb.order).enumerate() {
         let mut stage2 = dec.dec_icdf(&cb.ec_icdf[row..], 8);
         if stage2 == 0 {
             stage2 -= dec.dec_icdf(&entropy_tables::NLSF_EXT_ICDF, 8);
         } else if stage2 == 2 * entropy_tables::NLSF_QUANT_MAX_AMPLITUDE {
             stage2 += dec.dec_icdf(&entropy_tables::NLSF_EXT_ICDF, 8);
         }
+        nlsf_indices[i + 1] = (stage2 - entropy_tables::NLSF_QUANT_MAX_AMPLITUDE) as i8;
     }
 
+    let mut interp_coef_q2 = 4i8;
     if state.nb_subfr == MAX_NB_SUBFR {
-        let _ = dec.dec_icdf(&entropy_tables::NLSF_INTERP_FACTOR_ICDF, 8);
+        interp_coef_q2 = dec.dec_icdf(&entropy_tables::NLSF_INTERP_FACTOR_ICDF, 8) as i8;
     }
 
     if signal_type == TYPE_VOICED {
@@ -143,6 +159,10 @@ pub(super) fn decode_indices(
     Ok(DecodedSideInfo {
         signal_type,
         quant_offset_type,
+        nlsf: DecodedNlsfIndices {
+            values: nlsf_indices,
+            interp_coef_q2,
+        },
     })
 }
 

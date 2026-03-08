@@ -8,10 +8,13 @@ use crate::entropy::EcDec;
 
 mod entropy_tables;
 mod lbrr;
+mod lpc;
+mod nlsf;
 mod stereo;
 mod tables;
 
 const MAX_INTERNAL_FRAMES: usize = 3;
+const MAX_LPC_HALVES: usize = 2;
 
 /// Result of decoding one SILK Opus frame.
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +41,9 @@ pub(crate) struct SilkDecoder {
     channels: u8,
     final_range: u32,
     lbrr_state: [lbrr::ChannelState; 2],
+    prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
+    pred_coef_q12: [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+    first_frame_after_reset: [bool; 2],
     prev_decode_only_middle: bool,
 }
 
@@ -52,6 +58,9 @@ impl SilkDecoder {
             channels,
             final_range: 0,
             lbrr_state: [lbrr::ChannelState::default(), lbrr::ChannelState::default()],
+            prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
+            pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+            first_frame_after_reset: [true; 2],
             prev_decode_only_middle: false,
         }
     }
@@ -63,6 +72,10 @@ impl SilkDecoder {
     pub fn reset(&mut self) {
         self.final_range = 0;
         self.lbrr_state = [lbrr::ChannelState::default(), lbrr::ChannelState::default()];
+        self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
+        self.pred_coef_q12 =
+            [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
+        self.first_frame_after_reset = [true; 2];
         self.prev_decode_only_middle = false;
     }
 
@@ -140,6 +153,9 @@ impl SilkDecoder {
             internal_frames,
             &mut self.lbrr_state,
             frame_length,
+            &mut self.prev_nlsf_q15,
+            &mut self.pred_coef_q12,
+            &mut self.first_frame_after_reset,
             &mut self.prev_decode_only_middle,
             packet_idx,
             trace_pkt0,
@@ -259,6 +275,9 @@ fn consume_main_payload(
     internal_frames: usize,
     states: &mut [lbrr::ChannelState; 2],
     frame_length: usize,
+    prev_nlsf_q15: &mut [[i16; tables::MAX_LPC_ORDER]; 2],
+    pred_coef_q12: &mut [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+    first_frame_after_reset: &mut [bool; 2],
     prev_decode_only_middle: &mut bool,
     packet_idx: usize,
     trace_pkt0: bool,
@@ -302,6 +321,31 @@ fn consume_main_payload(
                 false,
                 cond,
             )?;
+            update_lpc_from_nlsf(
+                states[ch].fs_khz,
+                &side.nlsf,
+                &mut prev_nlsf_q15[ch],
+                &mut pred_coef_q12[ch][i],
+                &mut first_frame_after_reset[ch],
+            );
+            if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
+                trace_lpc(
+                    packet_idx,
+                    ch,
+                    i,
+                    "pred0",
+                    &pred_coef_q12[ch][i][0],
+                    states[ch].fs_khz,
+                );
+                trace_lpc(
+                    packet_idx,
+                    ch,
+                    i,
+                    "pred1",
+                    &pred_coef_q12[ch][i][1],
+                    states[ch].fs_khz,
+                );
+            }
             lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
             if trace_pkt0 {
                 trace_checkpoint(dec, packet_idx, &format!("after_main_i{}_ch{}", i, ch));
@@ -333,6 +377,83 @@ fn trace_checkpoint(dec: &EcDec<'_>, packet_idx: usize, label: &str) {
         dec.tell(),
         dec.tell_frac(),
         dec.rng()
+    );
+}
+
+/// Decode, optionally interpolate, and convert one NLSF vector to LPC halves.
+///
+/// Params: internal `fs_khz`, decoded `nlsf_indices`, mutable `prev_nlsf_q15`,
+/// mutable `pred_coef_q12`, and per-channel `first_frame_after_reset`.
+/// Returns: nothing; previous NLSF and both LPC halves are updated in place.
+fn update_lpc_from_nlsf(
+    fs_khz: u32,
+    nlsf_indices: &lbrr::DecodedNlsfIndices,
+    prev_nlsf_q15: &mut [i16; tables::MAX_LPC_ORDER],
+    pred_coef_q12: &mut [[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES],
+    first_frame_after_reset: &mut bool,
+) {
+    let codebook = tables::nlsf_codebook(fs_khz);
+    let order = codebook.order;
+    let mut curr_nlsf_q15 = [0i16; tables::MAX_LPC_ORDER];
+    nlsf::nlsf_decode(
+        &mut curr_nlsf_q15[..order],
+        &nlsf_indices.values[..order + 1],
+        codebook,
+    );
+    lpc::nlsf2a(
+        &mut pred_coef_q12[1][..order],
+        &curr_nlsf_q15[..order],
+        order,
+    );
+
+    let interp_coef_q2 = if *first_frame_after_reset {
+        4
+    } else {
+        nlsf_indices.interp_coef_q2
+    };
+    if interp_coef_q2 < 4 {
+        let mut interp_nlsf_q15 = [0i16; tables::MAX_LPC_ORDER];
+        for i in 0..order {
+            let delta = curr_nlsf_q15[i] as i32 - prev_nlsf_q15[i] as i32;
+            interp_nlsf_q15[i] =
+                (prev_nlsf_q15[i] as i32 + ((interp_coef_q2 as i32 * delta) >> 2)) as i16;
+        }
+        lpc::nlsf2a(
+            &mut pred_coef_q12[0][..order],
+            &interp_nlsf_q15[..order],
+            order,
+        );
+    } else {
+        let pred1 = pred_coef_q12[1];
+        pred_coef_q12[0][..order].copy_from_slice(&pred1[..order]);
+    }
+
+    prev_nlsf_q15[..order].copy_from_slice(&curr_nlsf_q15[..order]);
+    *first_frame_after_reset = false;
+}
+
+/// Emit packet-0 LPC trace for one channel/frame half.
+///
+/// Params: `packet_idx`, coded `channel`, internal frame `frame_idx`, `label`,
+/// LPC slice `lpc_q12`, and internal `fs_khz`.
+/// Returns: nothing.
+fn trace_lpc(
+    packet_idx: usize,
+    channel: usize,
+    frame_idx: usize,
+    label: &str,
+    lpc_q12: &[i16],
+    fs_khz: u32,
+) {
+    let order = tables::nlsf_codebook(fs_khz).order;
+    let coeffs = lpc_q12[..order]
+        .iter()
+        .map(i16::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "SILK pkt{} LPC ch{} i{} {}_q12: {}",
+        packet_idx, channel, frame_idx, label, coeffs
     );
 }
 
@@ -405,6 +526,12 @@ fn internal_frame_shape(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Decoder;
+    use std::fs;
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+
+    const TV02_PKT0_LPC_Q12: [i16; 10] = [5041, -1246, 1017, -614, 431, -560, 131, -357, 284, -46];
 
     #[test]
     fn maps_silk_internal_sample_rates() {
@@ -440,5 +567,108 @@ mod tests {
         let result = silk.decode_frame(&[0; 8], 960, 0, 1, 0, &mut out).unwrap();
         assert_eq!(result.samples_per_channel, 960);
         assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn testvector02_pkt0_nlsf_to_lpc_matches_cref() {
+        let packet = read_first_opus_demo_packet(&vectors_dir().join("testvector02.bit"));
+        let mut decoder = Decoder::new(48_000, 2).unwrap();
+        let mut out = vec![0i16; decoder.max_frame_size_per_channel() * 2];
+        let samples = decoder.decode(Some(&packet), &mut out).unwrap();
+        assert_eq!(samples, 2880);
+        assert_eq!(decoder.final_range(), 0x5037_3c71);
+        assert_eq!(
+            &decoder.silk.pred_coef_q12[0][0][0][..10],
+            &TV02_PKT0_LPC_Q12
+        );
+        assert_eq!(
+            &decoder.silk.pred_coef_q12[0][0][1][..10],
+            &TV02_PKT0_LPC_Q12
+        );
+    }
+
+    #[test]
+    fn testvector02_final_range_matches_reference_for_all_packets() {
+        let packets = read_opus_demo_stream(&vectors_dir().join("testvector02.bit"));
+        let mut decoder = Decoder::new(48_000, 2).unwrap();
+        let mut out = vec![0i16; decoder.max_frame_size_per_channel() * 2];
+        for (packet_idx, packet) in packets.iter().enumerate() {
+            let _samples = decoder.decode(Some(&packet.payload), &mut out).unwrap();
+            assert_eq!(
+                decoder.final_range(),
+                packet.expected_final_range,
+                "packet {packet_idx} final_range"
+            );
+        }
+    }
+
+    /// Resolve the local RFC vector directory used by decoder tests.
+    ///
+    /// Params: none.
+    /// Returns: absolute path to `testdata/opus_testvectors`.
+    fn vectors_dir() -> PathBuf {
+        if let Ok(path) = std::env::var("OPUS_TESTVECTORS_DIR") {
+            return PathBuf::from(path);
+        }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/opus_testvectors")
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// Read the first packet payload from an `opus_demo` `.bit` stream.
+    ///
+    /// Params: absolute `path` to the vector stream file.
+    /// Returns: first packet payload bytes.
+    fn read_first_opus_demo_packet(path: &Path) -> Vec<u8> {
+        let mut file = fs::File::open(path).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let packet_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        bytes[8..8 + packet_len].to_vec()
+    }
+
+    /// Read an `opus_demo` `.bit` stream into packet payloads plus expected ranges.
+    ///
+    /// Params: absolute `path` to the `.bit` vector file.
+    /// Returns: ordered packet list with payloads and reference `final_range`.
+    fn read_opus_demo_stream(path: &Path) -> Vec<DemoPacket> {
+        let mut file = fs::File::open(path).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let mut packets = Vec::new();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let packet_len = u32::from_be_bytes([
+                bytes[index],
+                bytes[index + 1],
+                bytes[index + 2],
+                bytes[index + 3],
+            ]) as usize;
+            index += 4;
+            let expected_final_range = u32::from_be_bytes([
+                bytes[index],
+                bytes[index + 1],
+                bytes[index + 2],
+                bytes[index + 3],
+            ]);
+            index += 4;
+            let payload = bytes[index..index + packet_len].to_vec();
+            index += packet_len;
+            packets.push(DemoPacket {
+                payload,
+                expected_final_range,
+            });
+        }
+        packets
+    }
+
+    /// One `opus_demo` packet plus its reference range coder state.
+    #[derive(Debug, Clone)]
+    struct DemoPacket {
+        /// Encoded Opus payload bytes.
+        payload: Vec<u8>,
+        /// Reference decoder final range after decoding the packet.
+        expected_final_range: u32,
     }
 }

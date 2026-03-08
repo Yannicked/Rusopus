@@ -2,6 +2,7 @@
 
 ## 2026-03-05
 
+- feat(silk): completed Phase 3a entropy path for SILK-only packets: VAD/LBRR parsing, stereo signaling, main/LBRR indices+pulses consumption, `final_range` match for all `testvector02` packets, and corrected RFC vector manifest channel counts.
 - checkpoint(pre-silk): removed decoder debug instrumentation in `opus-decoder` (`eprintln`, `OPUS_TRACE_*`, `OPUS_DISABLE_*`); kept only `OPUS_TRACE_PACKET_MAX_DELTA` in `conformance_rfc`.
 - chore(lint): ran `cargo clippy -p opus-decoder --all-targets`; removed dead transient debug API, removed unused `CeltMode` metadata fields (`fs`, `eff_ebands`, `max_lm`, `nb_short_mdcts`), and removed unused `Complex32` import in MDCT path.
 
