@@ -165,15 +165,27 @@ mod tests {
         let mut input = Vec::with_capacity(n);
         for i in 0..n {
             let t = i as f32 / n as f32;
-            input.push(Complex32::new((2.0 * PI * 3.0 * t).sin(), (2.0 * PI * 5.0 * t).cos()));
+            input.push(Complex32::new(
+                (2.0 * PI * 3.0 * t).sin(),
+                (2.0 * PI * 5.0 * t).cos(),
+            ));
         }
         let freq = forward_scaled(&input);
         let mut recon = vec![Complex32::new(0.0, 0.0); n];
         fft.ifft(&freq, &mut recon).expect("ifft must succeed");
         for (a, b) in input.iter().zip(recon.iter()) {
-            assert!((a.re - b.re).abs() < 2e-5, "re mismatch: {} vs {}", a.re, b.re);
-            assert!((a.im - b.im).abs() < 2e-5, "im mismatch: {} vs {}", a.im, b.im);
+            assert!(
+                (a.re - b.re).abs() < 2e-5,
+                "re mismatch: {} vs {}",
+                a.re,
+                b.re
+            );
+            assert!(
+                (a.im - b.im).abs() < 2e-5,
+                "im mismatch: {} vs {}",
+                a.im,
+                b.im
+            );
         }
     }
 }
-

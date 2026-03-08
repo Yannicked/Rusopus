@@ -2,3 +2,4 @@ target/
 .vscode/
 *.pcm
 /tmp/
+.cursor/

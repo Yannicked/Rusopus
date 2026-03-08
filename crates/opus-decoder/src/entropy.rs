@@ -110,9 +110,7 @@ impl<'a> EcDec<'a> {
     #[inline]
     pub fn tell_frac(&self) -> u32 {
         // Port of fast `ec_tell_frac()` from `celt/entcode.c`.
-        const CORRECTION: [u32; 8] = [
-            35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535,
-        ];
+        const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
 
         let nbits = (self.nbits_total as u32) << BITRES;
         let mut l = ec_ilog(self.rng);
@@ -372,4 +370,3 @@ mod tests {
         assert!(b >= a);
     }
 }
-

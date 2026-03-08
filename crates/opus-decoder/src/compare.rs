@@ -35,20 +35,28 @@ impl QualityResult {
 }
 
 pub fn compare_quality(
-    reference_pcm_48k_stereo: &[i16],
+    reference_pcm: &[i16],
     candidate_pcm: &[i16],
+    reference_channels: usize,
     candidate_channels: usize,
     rate_hz: u32,
 ) -> Result<QualityResult, String> {
+    if reference_channels != 1 && reference_channels != 2 {
+        return Err(format!(
+            "invalid reference channel count: {reference_channels}"
+        ));
+    }
     if candidate_channels != 1 && candidate_channels != 2 {
-        return Err(format!("invalid candidate channel count: {candidate_channels}"));
+        return Err(format!(
+            "invalid candidate channel count: {candidate_channels}"
+        ));
     }
     if !matches!(rate_hz, 8000 | 12000 | 16000 | 24000 | 48000) {
         return Err(format!("invalid rate_hz: {rate_hz}"));
     }
 
-    if reference_pcm_48k_stereo.len() % 2 != 0 {
-        return Err("reference pcm is not stereo interleaved".to_string());
+    if reference_pcm.len() % reference_channels != 0 {
+        return Err("reference pcm is not properly interleaved".to_string());
     }
     if candidate_pcm.len() % candidate_channels != 0 {
         return Err("candidate pcm is not properly interleaved".to_string());
@@ -59,8 +67,7 @@ pub fn compare_quality(
         return Err("rate_hz must divide 48000".to_string());
     }
 
-    // Reference is always read as stereo in opus_compare.c, then downmixed if needed.
-    let xlength = reference_pcm_48k_stereo.len() / 2;
+    let xlength = reference_pcm.len() / reference_channels;
     let ylength = candidate_pcm.len() / candidate_channels;
     if xlength != ylength.saturating_mul(downsample) {
         return Err(format!(
@@ -73,16 +80,20 @@ pub fn compare_quality(
         ));
     }
 
-    // Convert to f32 (opus_compare uses float internally for most arrays).
+    // Convert reference to f32 (mono or stereo per reference_channels).
     let mut x: Vec<f32> = Vec::with_capacity(xlength * candidate_channels);
-    if candidate_channels == 1 {
+    if reference_channels == 1 {
         for i in 0..xlength {
-            let l = reference_pcm_48k_stereo[2 * i] as f32;
-            let r = reference_pcm_48k_stereo[2 * i + 1] as f32;
+            x.push(reference_pcm[i] as f32);
+        }
+    } else if candidate_channels == 1 {
+        for i in 0..xlength {
+            let l = reference_pcm[2 * i] as f32;
+            let r = reference_pcm[2 * i + 1] as f32;
             x.push(0.5 * (l + r));
         }
     } else {
-        for &s in reference_pcm_48k_stereo {
+        for &s in reference_pcm {
             x.push(s as f32);
         }
     }
@@ -182,8 +193,7 @@ pub fn compare_quality(
         for bi in 0..ybands {
             for xj in BANDS[bi]..BANDS[bi + 1] {
                 for ci in 0..nch {
-                    x_ps[(xi * NFREQS + xj) * nch + ci] +=
-                        0.1 * xb[(xi * NBANDS + bi) * nch + ci];
+                    x_ps[(xi * NFREQS + xj) * nch + ci] += 0.1 * xb[(xi * NBANDS + bi) * nch + ci];
                     y_ps[(xi * yfreqs + xj) * nch + ci] += 0.1 * xb[(xi * NBANDS + bi) * nch + ci];
                 }
             }
@@ -228,8 +238,8 @@ pub fn compare_quality(
                     break;
                 }
                 for ci in 0..nch {
-                    let re = y_ps[(xi * yfreqs + xj) * nch + ci]
-                        / x_ps[(xi * NFREQS + xj) * nch + ci];
+                    let re =
+                        y_ps[(xi * yfreqs + xj) * nch + ci] / x_ps[(xi * NFREQS + xj) * nch + ci];
                     let mut im = re - re.ln() - 1.0;
                     if (79..=81).contains(&xj) {
                         im *= 0.1;
@@ -275,7 +285,8 @@ fn band_energy(
     let mut x = vec![0f32; nchannels * window_sz];
 
     for xj in 0..window_sz {
-        window[xj] = 0.5 - 0.5 * (2.0 * f32::consts::PI / (window_sz as f32 - 1.0) * xj as f32).cos();
+        window[xj] =
+            0.5 - 0.5 * (2.0 * f32::consts::PI / (window_sz as f32 - 1.0) * xj as f32).cos();
     }
     for xj in 0..window_sz {
         c[xj] = (2.0 * f32::consts::PI / window_sz as f32 * xj as f32).cos();
@@ -288,8 +299,7 @@ fn band_energy(
     for xi in 0..nframes {
         for ci in 0..nchannels {
             for xk in 0..window_sz {
-                x[ci * window_sz + xk] =
-                    window[xk] * input[(xi * step + xk) * nchannels + ci];
+                x[ci * window_sz + xk] = window[xk] * input[(xi * step + xk) * nchannels + ci];
             }
         }
 
