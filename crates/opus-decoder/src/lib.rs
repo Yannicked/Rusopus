@@ -19,12 +19,12 @@ macro_rules! debug_trace {
     }};
 }
 
-mod error;
 mod celt;
-mod silk;
-mod entropy;
-mod packet;
 pub mod compare;
+mod entropy;
+mod error;
+mod packet;
+mod silk;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use error::Error;
@@ -39,6 +39,8 @@ pub struct Decoder {
     silk: silk::SilkDecoder,
     last_packet_split_count: usize,
     last_final_range: u32,
+    prev_mode: Option<OpusMode>,
+    prev_redundancy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +67,8 @@ impl Decoder {
             silk: silk::SilkDecoder::new(fs_hz, channels),
             last_packet_split_count: 0,
             last_final_range: 0,
+            prev_mode: None,
+            prev_redundancy: false,
         })
     }
 
@@ -95,6 +99,8 @@ impl Decoder {
         self.silk.reset();
         self.last_packet_split_count = 0;
         self.last_final_range = 0;
+        self.prev_mode = None;
+        self.prev_redundancy = false;
     }
 
     /// Return range coder final state for conformance comparison.
@@ -165,6 +171,12 @@ impl Decoder {
             OpusMode::Hybrid => "hybrid",
             OpusMode::CeltOnly => "celt",
         };
+        if std::env::var("OPUS_DUMP_MODES").is_ok() {
+            eprintln!(
+                "PKT{} mode={:?} prev_mode={:?}",
+                packet_idx, mode, self.prev_mode
+            );
+        }
         // #region agent log
         let log_path = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -181,13 +193,7 @@ impl Decoder {
                 .unwrap_or(0);
             let line = format!(
                 "{{\"sessionId\":\"bea564\",\"runId\":\"run-tv01-tv10-debug1\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:mode_gate\",\"message\":\"decoder_mode_gate\",\"data\":{{\"packet_idx\":{},\"toc\":{},\"config\":{},\"mode\":\"{}\",\"decoder_channels\":{},\"samples_per_channel_needed\":{}}},\"timestamp\":{}}}\n",
-                packet_idx,
-                toc,
-                config,
-                mode_name,
-                self.channels,
-                samples_per_channel_needed,
-                ts
+                packet_idx, toc, config, mode_name, self.channels, samples_per_channel_needed, ts
             );
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
@@ -244,12 +250,7 @@ impl Decoder {
                     .unwrap_or(0);
                 let line = format!(
                     "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:151\",\"message\":\"packet_vs_decoder_channels\",\"data\":{{\"packet_idx\":{},\"packet_channels\":{},\"decoder_channels\":{},\"toc\":{},\"config\":{}}},\"timestamp\":{}}}\n",
-                    packet_idx,
-                    pp.packet_channels,
-                    self.channels,
-                    pp.toc,
-                    config,
-                    ts
+                    packet_idx, pp.packet_channels, self.channels, pp.toc, config, ts
                 );
                 let _ = std::io::Write::write_all(&mut f, line.as_bytes());
             }
@@ -258,12 +259,31 @@ impl Decoder {
         self.last_packet_split_count = 0;
         self.last_final_range = 0;
 
+        let transition = self.prev_mode.is_some()
+            && ((mode == OpusMode::CeltOnly
+                && self.prev_mode != Some(OpusMode::CeltOnly)
+                && !self.prev_redundancy)
+                || (mode != OpusMode::CeltOnly && self.prev_mode == Some(OpusMode::CeltOnly)));
+        let transition_samples = (self.fs_hz as usize) / 200;
+        let transition_overlap = (self.fs_hz as usize) / 400;
+        let channels = self.channels as usize;
+        let celt_transition = if transition && mode == OpusMode::CeltOnly {
+            vec![0i16; transition_samples * channels]
+        } else {
+            Vec::new()
+        };
+        let mut apply_celt_transition = transition && mode == OpusMode::CeltOnly;
+        let mut reset_silk = transition && self.prev_mode == Some(OpusMode::CeltOnly);
+        let mut had_redundancy = false;
         let mut written_per_channel = 0usize;
         for frame in pp.frames() {
             let frame_samples_48k = pp.samples_per_frame_48k;
             let out_frame = &mut out[written_per_channel * self.channels as usize..];
             match mode {
                 OpusMode::CeltOnly => {
+                    if apply_celt_transition {
+                        self.celt.reset();
+                    }
                     // CELT frame sizes are specified in 48 kHz samples; this is enough
                     // to drive the CELT-side LM selection.
                     let frame = self.celt.decode_frame(
@@ -274,26 +294,123 @@ impl Decoder {
                         packet_idx,
                         out_frame,
                     )?;
+                    if apply_celt_transition {
+                        apply_transition_fade_i16(
+                            &celt_transition,
+                            &mut out_frame[..frame.samples_per_channel * channels],
+                            transition_overlap.min(frame.samples_per_channel / 2),
+                            channels,
+                            self.celt.window(),
+                            self.fs_hz,
+                        );
+                        apply_celt_transition = false;
+                    }
                     self.last_packet_split_count += self.celt.last_split_count();
                     self.last_final_range = self.celt.final_range();
                     written_per_channel += frame.samples_per_channel;
                 }
                 OpusMode::SilkOnly => {
-                    let frame = self.silk.decode_frame(
-                        frame,
+                    if reset_silk {
+                        self.silk.reset();
+                        reset_silk = false;
+                    }
+                    let packet_frame = frame;
+                    let silk_frame = self.silk.decode_frame(
+                        packet_frame,
                         frame_samples_48k,
                         config,
                         pp.packet_channels,
                         packet_idx,
                         out_frame,
                     )?;
-                    self.last_final_range = self.silk.final_range();
-                    written_per_channel += frame.samples_per_channel;
+                    if packet_idx == 4 {
+                        // #region agent log H47
+                        eprintln!(
+                            "DBG H47 rust pkt4 top_level_silk frame_samples_48k={} packet_channels={} written={} final_range={} consumed_redundancy={} redundancy_bytes={} celt_to_silk={} crossfade_applied=false",
+                            frame_samples_48k,
+                            pp.packet_channels,
+                            silk_frame.samples_per_channel,
+                            self.silk.final_range(),
+                            silk_frame.consumed_redundancy,
+                            silk_frame.redundancy_bytes,
+                            silk_frame.celt_to_silk
+                        );
+                        // #endregion
+                    }
+                    if matches!(packet_idx, 99) {
+                        eprintln!(
+                            "DBG H57 rust pkt{} top_level_silk packet_channels={} written={} final_range={} has_redundancy={} redundancy_bytes={} celt_to_silk={}",
+                            packet_idx,
+                            pp.packet_channels,
+                            silk_frame.samples_per_channel,
+                            self.silk.final_range(),
+                            silk_frame.consumed_redundancy,
+                            silk_frame.redundancy_bytes,
+                            silk_frame.celt_to_silk
+                        );
+                    }
+                    let mut redundancy_rng = 0u32;
+                    if silk_frame.consumed_redundancy {
+                        let redundancy_data =
+                            &packet_frame[packet_frame.len() - silk_frame.redundancy_bytes..];
+                        let redundancy_frame_size_48k = 240usize;
+                        let redundancy_samples = (self.fs_hz as usize) / 200;
+                        let mut redundancy_out =
+                            vec![0i16; redundancy_samples * self.channels as usize];
+                        self.celt.reset();
+                        let redundancy_frame = self.celt.decode_frame(
+                            redundancy_data,
+                            redundancy_frame_size_48k,
+                            20,
+                            pp.packet_channels,
+                            packet_idx,
+                            &mut redundancy_out,
+                        )?;
+                        redundancy_rng = self.celt.final_range();
+                        let xor_range = self.silk.final_range() ^ redundancy_rng;
+                        if !silk_frame.celt_to_silk {
+                            let overlap = (self.fs_hz as usize) / 400;
+                            let channels = self.channels as usize;
+                            let silk_tail_start =
+                                (silk_frame.samples_per_channel - overlap) * channels;
+                            let silk_tail_end = silk_frame.samples_per_channel * channels;
+                            let redundancy_start = overlap * channels;
+                            let redundancy_end = redundancy_start + overlap * channels;
+                            let silk_tail = out_frame[silk_tail_start..silk_tail_end].to_vec();
+                            smooth_fade_i16(
+                                &silk_tail,
+                                &redundancy_out[redundancy_start..redundancy_end],
+                                &mut out_frame[silk_tail_start..silk_tail_end],
+                                overlap,
+                                channels,
+                                self.celt.window(),
+                                self.fs_hz,
+                            );
+                        }
+                        if packet_idx == 4 {
+                            // #region agent log H50
+                            let fade_start = ((self.fs_hz as usize) / 400) * self.channels as usize;
+                            let fade_end = (fade_start + 8).min(redundancy_out.len());
+                            eprintln!(
+                                "DBG H50 rust pkt4 redundancy_probe bytes={} decoded={} redundant_rng={:#010x} xor_final_range={:#010x} out0_8={:?} fade_in_8={:?}",
+                                silk_frame.redundancy_bytes,
+                                redundancy_frame.samples_per_channel,
+                                redundancy_rng,
+                                xor_range,
+                                &redundancy_out[..8.min(redundancy_out.len())],
+                                &redundancy_out[fade_start..fade_end]
+                            );
+                            // #endregion
+                        }
+                    }
+                    had_redundancy = silk_frame.consumed_redundancy && !silk_frame.celt_to_silk;
+                    self.last_final_range = self.silk.final_range() ^ redundancy_rng;
+                    written_per_channel += silk_frame.samples_per_channel;
                     if silk_trace && packet_idx <= 2 {
                         eprintln!(
                             "SILK pkt{} frame_returned={} written_total={} frame_samples_48k={}",
                             packet_idx,
-                            frame.samples_per_channel,
+                            silk_frame.samples_per_channel,
                             written_per_channel,
                             frame_samples_48k
                         );
@@ -303,6 +420,77 @@ impl Decoder {
             }
         }
 
+        self.prev_mode = Some(mode);
+        self.prev_redundancy = had_redundancy;
         Ok(written_per_channel)
     }
+}
+
+/// Crossfade SILK PCM with redundant CELT PCM using the CELT overlap window.
+///
+/// Params: previous `in1`, incoming `in2`, mutable `out`, overlap length,
+/// interleaved `channels`, CELT `window`, and output sampling rate `fs_hz`.
+/// Returns: nothing; `out` is updated in-place.
+fn smooth_fade_i16(
+    in1: &[i16],
+    in2: &[i16],
+    out: &mut [i16],
+    overlap: usize,
+    channels: usize,
+    window: &[f32],
+    fs_hz: u32,
+) {
+    let inc = (48_000 / fs_hz) as usize;
+    for c in 0..channels {
+        for i in 0..overlap {
+            let w = window[i * inc] * window[i * inc];
+            let idx = i * channels + c;
+            let mixed = w * in2[idx] as f32 + (1.0 - w) * in1[idx] as f32;
+            out[idx] = mixed.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+    }
+}
+
+/// Apply the SILK-to-CELT transition prefix and crossfade.
+///
+/// Params: previous-mode `transition` PCM, mutable decoded `pcm`, fade length
+/// `overlap`, interleaved `channels`, CELT `window`, and output rate `fs_hz`.
+/// Returns: nothing; `pcm` is updated in-place.
+fn apply_transition_fade_i16(
+    transition: &[i16],
+    pcm: &mut [i16],
+    overlap: usize,
+    channels: usize,
+    window: &[f32],
+    fs_hz: u32,
+) {
+    if overlap == 0 || channels == 0 {
+        return;
+    }
+
+    let prefix_len = overlap * channels;
+    let copy_len = prefix_len.min(transition.len()).min(pcm.len());
+    pcm[..copy_len].copy_from_slice(&transition[..copy_len]);
+
+    let fade_available = (transition.len().saturating_sub(prefix_len))
+        .min(pcm.len().saturating_sub(prefix_len))
+        / channels;
+    if fade_available == 0 {
+        return;
+    }
+
+    let fade_samples = fade_available.min(overlap);
+    let fade_len = fade_samples * channels;
+    let fade_start = prefix_len;
+    let fade_end = fade_start + fade_len;
+    let incoming = pcm[fade_start..fade_end].to_vec();
+    smooth_fade_i16(
+        &transition[fade_start..fade_end],
+        &incoming,
+        &mut pcm[fade_start..fade_end],
+        fade_samples,
+        channels,
+        window,
+        fs_hz,
+    );
 }
