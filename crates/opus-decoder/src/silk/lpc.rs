@@ -13,6 +13,8 @@ const MAX_PREDICTION_POWER_GAIN_INV_Q30: i32 = 107_374;
 /// Params: mutable `lpc_q12`, stabilized `nlsf_q15`, and LPC `order` (10 or 16).
 /// Returns: nothing; `lpc_q12[..order]` is overwritten.
 pub(super) fn nlsf2a(lpc_q12: &mut [i16], nlsf_q15: &[i16], order: usize) {
+    let dbg_pkt223_nlsf = order == 10
+        && nlsf_q15[..order] == [3734, 4720, 6401, 8407, 9236, 14359, 20445, 23284, 26072, 29935];
     let ordering = match order {
         10 => &[0usize, 9, 6, 3, 4, 5, 8, 1, 2, 7][..],
         16 => &[0usize, 15, 8, 7, 4, 11, 12, 3, 2, 13, 10, 5, 6, 9, 14, 1][..],
@@ -44,8 +46,19 @@ pub(super) fn nlsf2a(lpc_q12: &mut [i16], nlsf_q15: &[i16], order: usize) {
     }
 
     lpc_fit(lpc_q12, &mut a32_qa1, 12, QA + 1, order);
+    if dbg_pkt223_nlsf {
+        // #region agent log H30
+        eprintln!("DBG H30 rust pkt223 nlsf2a pre_stabilize lpc_q12={:?} a32_qa1={:?}", &lpc_q12[..order], &a32_qa1[..order]);
+        // #endregion
+    }
     for i in 0..MAX_LPC_STABILIZE_ITERATIONS {
-        if lpc_inv_pred_gain(&lpc_q12[..order], order) != 0 {
+        let inv_gain = lpc_inv_pred_gain(&lpc_q12[..order], order);
+        if dbg_pkt223_nlsf {
+            // #region agent log H31
+            eprintln!("DBG H31 rust pkt223 nlsf2a iter={} inv_gain={} lpc_q12={:?}", i, inv_gain, &lpc_q12[..order]);
+            // #endregion
+        }
+        if inv_gain != 0 {
             break;
         }
         bw_expand_32(&mut a32_qa1[..order], order, 65_536 - (2 << i));
@@ -236,12 +249,80 @@ fn mul32_frac_q(a: i32, b: i32, q: usize) -> i32 {
     rshift_round64((a as i64) * (b as i64), q)
 }
 
+/// Compute a saturating absolute value for normalization.
+///
+/// Params: signed `value`.
+/// Returns: non-negative magnitude, saturating `i32::MIN`.
+fn abs32_for_clz(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else {
+        value.abs()
+    }
+}
+
+/// Multiply by the signed low 16-bit half of `b32` and keep high word.
+///
+/// Params: signed `a32` and signed `b32`.
+/// Returns: high-word signed product.
+fn smulwb(a32: i32, b32: i32) -> i32 {
+    let b16 = b32 as i16 as i32;
+    let high = (a32 >> 16) * b16;
+    let low = ((a32 & 0xFFFF) * b16) >> 16;
+    high.wrapping_add(low)
+}
+
+/// Approximate `a32 + ((b32 * c32) >> 16)` with wraparound semantics.
+///
+/// Params: accumulator `a32` and signed multiplicands `b32` and `c32`.
+/// Returns: accumulated high-word product.
+fn smlaww(a32: i32, b32: i32, c32: i32) -> i32 {
+    a32.wrapping_add(((b32 as i64 * c32 as i64) >> 16) as i32)
+}
+
+/// Left-shift with saturation.
+///
+/// Params: signed `value` and non-negative `shift`.
+/// Returns: left-shifted value clamped to `i32`.
+fn lshift_sat32(value: i32, shift: usize) -> i32 {
+    if shift >= 31 {
+        if value > 0 {
+            i32::MAX
+        } else if value < 0 {
+            i32::MIN
+        } else {
+            0
+        }
+    } else {
+        value
+            .clamp(i32::MIN >> shift, i32::MAX >> shift)
+            .wrapping_shl(shift as u32)
+    }
+}
+
 /// Approximate `(1 << q_res) / value` in fixed-point.
 ///
 /// Params: signed non-zero `value` and target result Q `q_res`.
 /// Returns: fixed-point inverse approximation.
 fn inverse32_var_q(value: i32, q_res: usize) -> i32 {
-    (((1i128 << q_res) + (value as i128 / 2)) / value as i128) as i32
+    debug_assert!(value != 0);
+    debug_assert!(q_res > 0);
+
+    let b_headrm = abs32_for_clz(value).leading_zeros() as usize - 1;
+    let b32_nrm = value << b_headrm;
+    let b32_inv = (i32::MAX >> 2) / (b32_nrm >> 16);
+    let mut result = b32_inv << 16;
+    let err_q32 = (((1i32 << 29) - smulwb(b32_nrm, b32_inv)) << 3) as i32;
+    result = smlaww(result, err_q32, b32_inv);
+
+    let lshift = 61isize - b_headrm as isize - q_res as isize;
+    if lshift <= 0 {
+        lshift_sat32(result, (-lshift) as usize)
+    } else if lshift < 32 {
+        result >> lshift
+    } else {
+        0
+    }
 }
 
 /// Round a signed 32-bit arithmetic right shift.

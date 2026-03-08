@@ -52,11 +52,13 @@ pub(crate) struct SilkDecoder {
     core_state: [decode_core::SilkChannelState; 2],
     resampler_state: [Option<resampler::SilkResampler>; 2],
     resampler_history: [[i16; 2]; 2],
+    stereo_state: stereo::StereoState,
     prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
     pred_coef_q12:
         [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
     first_frame_after_reset: [bool; 2],
     prev_decode_only_middle: bool,
+    prev_packet_channels: u8,
 }
 
 impl SilkDecoder {
@@ -76,10 +78,12 @@ impl SilkDecoder {
             ],
             resampler_state: [None, None],
             resampler_history: [[0; 2]; 2],
+            stereo_state: stereo::StereoState::default(),
             prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
             pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
             first_frame_after_reset: [true; 2],
             prev_decode_only_middle: false,
+            prev_packet_channels: 1,
         }
     }
 
@@ -96,10 +100,12 @@ impl SilkDecoder {
         ];
         self.resampler_state = [None, None];
         self.resampler_history = [[0; 2]; 2];
+        self.stereo_state = stereo::StereoState::default();
         self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
         self.pred_coef_q12 = [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
         self.first_frame_after_reset = [true; 2];
         self.prev_decode_only_middle = false;
+        self.prev_packet_channels = 1;
     }
 
     /// Return SILK range coder final state from last decoded frame.
@@ -162,6 +168,18 @@ impl SilkDecoder {
                     self.resampler_history[ch] = [0; 2];
                 }
             }
+            if self.channels == 2 && packet_channels == 2 && self.prev_packet_channels == 1 {
+                self.stereo_state.pred_prev_q13 = [0; 2];
+                self.stereo_state.s_side = [0; 2];
+                if let Some(left_resampler) = self.resampler_state[0].clone() {
+                    self.resampler_state[1] = Some(left_resampler);
+                }
+                if packet_idx == 602 {
+                    // #region agent log H39
+                    eprintln!("DBG H39 rust pkt602 mono_to_stereo copied_right_resampler");
+                    // #endregion
+                }
+            }
         }
         let parsed = parse_header(
             &mut dec,
@@ -195,6 +213,7 @@ impl SilkDecoder {
             &mut self.first_frame_after_reset,
             &mut self.core_state,
             &mut internal_pcm,
+            &mut self.stereo_state,
             &mut self.prev_decode_only_middle,
             packet_idx,
             trace_pkt0,
@@ -204,6 +223,30 @@ impl SilkDecoder {
         }
         out[..needed].fill(0);
         let internal_samples_per_channel = internal_frames * frame_length;
+        if std::env::var("OPUS_TRACE_INTERNAL_LEN").ok().as_deref() == Some("1") {
+            eprintln!(
+                "R pkt{} internal_samples={} internal_frames={} frame_length={}",
+                packet_idx,
+                internal_samples_per_channel,
+                internal_frames,
+                frame_length
+            );
+        }
+        if std::env::var("OPUS_DUMP_INTERNAL_PCM").ok().as_deref() == Some("1") {
+            let dump_path = "/tmp/rust_internal.pcm";
+            if packet_idx == 0 {
+                let _ = std::fs::remove_file(dump_path);
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dump_path)
+            {
+                for sample in &internal_pcm[0][..internal_samples_per_channel] {
+                    let _ = std::io::Write::write_all(&mut file, &sample.to_le_bytes());
+                }
+            }
+        }
         if self.fs_hz == 48_000 {
             for ch in 0..packet_channels as usize {
                 if let Some(resampler) = self.resampler_state[ch].as_mut() {
@@ -211,24 +254,52 @@ impl SilkDecoder {
                     for iframe_idx in 0..internal_frames {
                         let pcm_range = iframe_idx * frame_length..(iframe_idx + 1) * frame_length;
                         let frame_pcm = &internal_pcm[ch][pcm_range];
-                        let mut resamp_input = vec![0i16; frame_length + 2];
-                        resamp_input[..2].copy_from_slice(&self.resampler_history[ch]);
-                        resamp_input[2..2 + frame_length].copy_from_slice(frame_pcm);
                         let expected = resampler.output_len(frame_length);
-                        let written = resampler.process(
-                            &resamp_input[1..1 + frame_length],
-                            &mut resampled_pcm[ch][written_total..written_total + expected],
-                        );
+                        let written = if packet_channels == 2 {
+                            resampler.process(
+                                frame_pcm,
+                                &mut resampled_pcm[ch][written_total..written_total + expected],
+                            )
+                        } else {
+                            let mut resamp_input = vec![0i16; frame_length + 2];
+                            resamp_input[..2].copy_from_slice(&self.resampler_history[ch]);
+                            resamp_input[2..2 + frame_length].copy_from_slice(frame_pcm);
+                            let written = resampler.process(
+                                &resamp_input[1..1 + frame_length],
+                                &mut resampled_pcm[ch][written_total..written_total + expected],
+                            );
+                            self.resampler_history[ch][0] = resamp_input[frame_length];
+                            self.resampler_history[ch][1] = resamp_input[frame_length + 1];
+                            written
+                        };
                         debug_assert_eq!(written, expected);
-                        self.resampler_history[ch][0] = resamp_input[frame_length];
-                        self.resampler_history[ch][1] = resamp_input[frame_length + 1];
                         written_total += written;
                     }
                     debug_assert_eq!(written_total, samples_per_channel);
+                    if packet_idx == 602 {
+                        // #region agent log H35
+                        eprintln!(
+                            "DBG H35 rust pkt602 ch{} resampled[0..8]={:?}",
+                            ch,
+                            &resampled_pcm[ch][..8.min(samples_per_channel)]
+                        );
+                        // #endregion
+                    }
                 }
             }
         }
         if self.fs_hz == 48_000 {
+            if packet_idx == 602 {
+                // #region agent log H36
+                eprintln!(
+                    "DBG H36 rust pkt602 pre_interleave left[0..8]={:?} right[0..8]={:?} packet_channels={} out_channels={}",
+                    &resampled_pcm[0][..8.min(samples_per_channel)],
+                    &resampled_pcm[1][..8.min(samples_per_channel)],
+                    packet_channels,
+                    self.channels
+                );
+                // #endregion
+            }
             for n in 0..samples_per_channel {
                 let left = resampled_pcm[0][n];
                 match self.channels {
@@ -262,6 +333,7 @@ impl SilkDecoder {
             }
         }
 
+        self.prev_packet_channels = packet_channels;
         self.final_range = dec.final_range();
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "after_decode");
@@ -391,15 +463,30 @@ fn consume_main_payload(
     first_frame_after_reset: &mut [bool; 2],
     core_state: &mut [decode_core::SilkChannelState; 2],
     internal_pcm: &mut [[i16; MAX_INTERNAL_FRAMES * tables::MAX_FRAME_LENGTH]; 2],
+    stereo_state: &mut stereo::StereoState,
     prev_decode_only_middle: &mut bool,
     packet_idx: usize,
     trace_pkt0: bool,
 ) -> Result<(), Error> {
     for i in 0..internal_frames {
         let mut decode_only_middle = false;
+        let mut pred_q13 = [0i32; 2];
         if packet_channels == 2 {
-            let pred_q13 = stereo::decode_stereo_pred(dec);
+            pred_q13 = stereo::decode_stereo_pred(dec);
             decode_only_middle = !header.channels[1].vad_flags[i] && stereo::decode_mid_only(dec);
+            if packet_idx == 602 {
+                // #region agent log H32
+                eprintln!(
+                    "DBG H32 rust pkt602 iframe{} stereo pred={:?} vad0={} vad1={} decode_only_middle={} prev_decode_only_middle={}",
+                    i,
+                    pred_q13,
+                    header.channels[0].vad_flags[i],
+                    header.channels[1].vad_flags[i],
+                    decode_only_middle,
+                    *prev_decode_only_middle
+                );
+                // #endregion
+            }
             if trace_pkt0 {
                 trace_checkpoint(dec, packet_idx, &format!("after_stereo_i{}", i));
             }
@@ -414,6 +501,11 @@ fn consume_main_payload(
 
         for ch in 0..packet_channels {
             if ch == 1 && decode_only_middle {
+                if packet_idx == 602 {
+                    // #region agent log H33
+                    eprintln!("DBG H33 rust pkt602 iframe{} skip_ch1_mid_only", i);
+                    // #endregion
+                }
                 continue;
             }
             let cond = if i == 0 {
@@ -440,6 +532,9 @@ fn consume_main_payload(
                 &mut prev_nlsf_q15[ch],
                 &mut pred_coef_q12[ch][i],
                 &mut first_frame_after_reset[ch],
+                packet_idx,
+                i,
+                ch,
             );
             if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
                 trace_lpc(
@@ -477,19 +572,124 @@ fn consume_main_payload(
                 fs_khz: states[ch].fs_khz,
                 lpc_order: tables::nlsf_codebook(states[ch].fs_khz).order,
             };
+            if packet_idx == 223 && i == 0 && ch == 0 {
+                // #region agent log H28
+                eprintln!(
+                    "DBG H28 rust pkt223 if0 interp_coef_q2={} pred0={:?} pred1={:?}",
+                    side.nlsf.interp_coef_q2,
+                    &pred_coef_q12[ch][i][0][..frame_params.lpc_order],
+                    &pred_coef_q12[ch][i][1][..frame_params.lpc_order]
+                );
+                // #endregion
+            }
+            if matches!(packet_idx, 30 | 223) && i == 0 && ch == 0 {
+                let state_len = frame_params.lpc_order.min(10);
+                let out_tail_start = core_state[ch].out_buf.len().saturating_sub(8);
+                // #region agent log H19
+                eprintln!(
+                    "DBG H19 rust pkt{} if0 entry prev_gain_q16={} lag_prev={} signal_type={} gain_indices={:?} lag_index={} contour_index={} slpc10={:?} out_buf_tail8={:?}",
+                    packet_idx,
+                    core_state[ch].prev_gain_q16,
+                    core_state[ch].lag_prev,
+                    frame_params.signal_type,
+                    frame_params.gain_indices,
+                    frame_params.lag_index,
+                    frame_params.contour_index,
+                    &core_state[ch].s_lpc_q14_buf[..state_len],
+                    &core_state[ch].out_buf[out_tail_start..]
+                );
+                // #endregion
+            }
             let pcm_range = i * frame_length..(i + 1) * frame_length;
             let trace = decode_core::decode_core(
                 &frame_params,
                 &pred_coef_q12[ch][i],
                 &mut internal_pcm[ch][pcm_range],
                 &mut core_state[ch],
+                packet_idx,
+                i,
             );
             if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
                 trace_core(packet_idx, "exc_Q14", &trace.exc_q14_head);
                 trace_core(packet_idx, "sLPC_Q14", &trace.s_lpc_q14_head);
             }
+            if packet_idx == 602 {
+                let iframe_start = i * frame_length;
+                let iframe_end = (iframe_start + 8).min(iframe_start + frame_length);
+                // #region agent log H34
+                eprintln!(
+                    "DBG H34 rust pkt602 ch{} iframe{} internal_pcm[0..8]={:?}",
+                    ch,
+                    i,
+                    &internal_pcm[ch][iframe_start..iframe_end]
+                );
+                // #endregion
+            }
+            if silk_trace_enabled() && ch == 0 {
+                let iframe_start = i * frame_length;
+                let iframe_end = (iframe_start + 8).min(iframe_start + frame_length);
+                if packet_idx == 1 {
+                    let iframe_pcm = &internal_pcm[ch][i * frame_length..(i + 1) * frame_length];
+                    let max_abs = iframe_pcm.iter().map(|x| x.abs()).max().unwrap_or(0);
+                    eprintln!(
+                        "R pkt1 iframe{} signal_type={} max_abs_pcm={} pcm[0..8]={:?}",
+                        i,
+                        frame_params.signal_type,
+                        max_abs,
+                        &internal_pcm[ch][iframe_start..iframe_end]
+                    );
+                }
+                if matches!(packet_idx, 29 | 30 | 223) && i == 0 {
+                    let state_len = frame_params.lpc_order.min(10);
+                    // #region agent log H20
+                    eprintln!(
+                        "DBG H20 rust pkt{} if0 state[0..{}]: {:?}",
+                        packet_idx,
+                        state_len,
+                        &core_state[ch].s_lpc_q14_buf[..state_len]
+                    );
+                    eprintln!(
+                        "DBG H21 rust pkt{} if0 internal_pcm[0..8]: {:?}",
+                        packet_idx,
+                        &internal_pcm[ch][iframe_start..iframe_end]
+                    );
+                    // #endregion
+                }
+            }
             if trace_pkt0 {
                 trace_checkpoint(dec, packet_idx, &format!("after_main_i{}_ch{}", i, ch));
+            }
+        }
+
+        if packet_channels == 2 {
+            let pcm_range = i * frame_length..(i + 1) * frame_length;
+            let (left_channels, right_channels) = internal_pcm.split_at_mut(1);
+            stereo::ms_to_lr(
+                stereo_state,
+                &mut left_channels[0][pcm_range.clone()],
+                &mut right_channels[0][pcm_range.clone()],
+                pred_q13,
+                states[0].fs_khz,
+            );
+            if packet_idx == 602 {
+                let iframe_start = i * frame_length;
+                let iframe_end = (iframe_start + 8).min(iframe_start + frame_length);
+                // #region agent log H37
+                eprintln!(
+                    "DBG H37 rust pkt602 post_ms_to_lr ch0[0..8]={:?} ch1[0..8]={:?}",
+                    &internal_pcm[0][iframe_start..iframe_end],
+                    &internal_pcm[1][iframe_start..iframe_end]
+                );
+                // #endregion
+            }
+        } else {
+            let pcm_range = i * frame_length..(i + 1) * frame_length;
+            let frame = &internal_pcm[0][pcm_range.clone()];
+            stereo_state.s_mid.copy_from_slice(&frame[frame_length - 2..frame_length]);
+            if packet_idx == 601 {
+                // #region agent log H38
+                eprintln!("DBG H38 rust pkt601 iframe{} buffer_smid={:?}", i, stereo_state.s_mid);
+                // #endregion
             }
         }
 
@@ -532,6 +732,9 @@ fn update_lpc_from_nlsf(
     prev_nlsf_q15: &mut [i16; tables::MAX_LPC_ORDER],
     pred_coef_q12: &mut [[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES],
     first_frame_after_reset: &mut bool,
+    packet_idx: usize,
+    frame_idx: usize,
+    channel_idx: usize,
 ) {
     let codebook = tables::nlsf_codebook(fs_khz);
     let order = codebook.order;
@@ -560,6 +763,15 @@ fn update_lpc_from_nlsf(
         pred_coef_q12[0][..order].copy_from_slice(&pred1[..order]);
     }
 
+    if packet_idx == 223 && frame_idx == 0 && channel_idx == 0 {
+        // #region agent log H29
+        eprintln!(
+            "DBG H29 rust pkt223 if0 prev_nlsf={:?} curr_nlsf={:?}",
+            &prev_nlsf_q15[..order],
+            &curr_nlsf_q15[..order]
+        );
+        // #endregion
+    }
     prev_nlsf_q15[..order].copy_from_slice(&curr_nlsf_q15[..order]);
     *first_frame_after_reset = false;
 }

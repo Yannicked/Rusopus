@@ -101,6 +101,8 @@ pub(super) fn decode_core(
     lpc_coeffs_q12: &[[i16; MAX_LPC_ORDER]; 2],
     output_pcm: &mut [i16],
     state: &mut SilkChannelState,
+    packet_idx: usize,
+    frame_idx: usize,
 ) -> CoreTrace {
     let subfr_length = params.frame_length / params.nb_subfr;
     let ltp_mem_length = params.fs_khz as usize * LTP_MEM_LENGTH_MS;
@@ -134,6 +136,16 @@ pub(super) fn decode_core(
     };
 
     let mut trace = CoreTrace::default();
+        if std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1") && (221..=232).contains(&packet_idx) {
+        eprintln!(
+            "R pkt{} iframe{} summary signal_type={} gains={:?} lags={:?}",
+            packet_idx,
+            frame_idx,
+            params.signal_type,
+            &gains_q16[..params.nb_subfr],
+            &pitch_lags[..params.nb_subfr]
+        );
+    }
     let offset_q10 =
         QUANTIZATION_OFFSETS_Q10[(params.signal_type >> 1) as usize][params.quant_offset_type as usize];
     let mut rand_seed = params.seed as i32;
@@ -175,10 +187,33 @@ pub(super) fn decode_core(
             1 << 16
         };
 
+        if packet_idx == 2 && frame_idx == 0 && k == 1 {
+            let relevant_start = MAX_LPC_ORDER - params.lpc_order;
+            let relevant_end = MAX_LPC_ORDER;
+            // #region agent log H17
+            eprintln!(
+                "DBG H17 rust sf1 before_gain_scale prev_gain_q16={} gain_q16={} gain_adj_q16={} state10={:?}",
+                state.prev_gain_q16,
+                gain_q16,
+                gain_adj_q16,
+                &s_lpc_q14[relevant_start..relevant_end]
+            );
+            // #endregion
+        }
         if gain_q16 != state.prev_gain_q16 {
             for sample in s_lpc_q14.iter_mut().take(MAX_LPC_ORDER) {
                 *sample = smulww(gain_adj_q16, *sample);
             }
+        }
+        if packet_idx == 2 && frame_idx == 0 && k == 1 {
+            let relevant_start = MAX_LPC_ORDER - params.lpc_order;
+            let relevant_end = MAX_LPC_ORDER;
+            // #region agent log H18
+            eprintln!(
+                "DBG H18 rust sf1 after_gain_scale state10={:?}",
+                &s_lpc_q14[relevant_start..relevant_end]
+            );
+            // #endregion
         }
         state.prev_gain_q16 = gain_q16;
 
@@ -189,6 +224,18 @@ pub(super) fn decode_core(
                     let copy_len = 2 * subfr_length;
                     state.out_buf[ltp_mem_length..ltp_mem_length + copy_len]
                         .copy_from_slice(&output_pcm[..copy_len]);
+                }
+                if packet_idx == 223 && frame_idx == 0 && k == 0 {
+                    let input_start = start_idx + k * subfr_length;
+                    // #region agent log H27
+                    eprintln!(
+                        "DBG H27 rust pkt223 sf0 rewhite start_idx={} a_q12={:?} out_buf_head12={:?} out_buf_tail12={:?}",
+                        start_idx,
+                        &a_q12[..params.lpc_order],
+                        &state.out_buf[input_start..input_start + 12],
+                        &state.out_buf[ltp_mem_length - 12..ltp_mem_length]
+                    );
+                    // #endregion
                 }
                 lpc_analysis_filter(
                     &mut s_ltp[start_idx..ltp_mem_length],
@@ -203,6 +250,19 @@ pub(super) fn decode_core(
                 for i in 0..(pitch_lag as usize + LTP_ORDER / 2) {
                     ltp_history_q15[ltp_buf_idx - i - 1] =
                         smulwb(inv_gain_q31, s_ltp[ltp_mem_length - i - 1] as i32);
+                }
+                if matches!(packet_idx, 30 | 223) && frame_idx == 0 && k == 0 {
+                    let pred_start = ltp_buf_idx - pitch_lag as usize + (LTP_ORDER / 2);
+                    // #region agent log H26
+                    eprintln!(
+                        "DBG H26 rust pkt{} sf0 inv_gain_q31={} ltp_scale_q14={} s_ltp_tail8={:?} ltp_hist8={:?}",
+                        packet_idx,
+                        inv_gain_q31,
+                        ltp_scale_q14,
+                        &s_ltp[ltp_mem_length - 8..ltp_mem_length],
+                        &ltp_history_q15[pred_start..pred_start + 8]
+                    );
+                    // #endregion
                 }
             } else if gain_adj_q16 != (1 << 16) {
                 for i in 0..(pitch_lag as usize + LTP_ORDER / 2) {
@@ -225,6 +285,9 @@ pub(super) fn decode_core(
                 pitch_lags[k] as usize,
                 subfr_length,
                 &ltp_coeffs_q14[k],
+                packet_idx,
+                frame_idx,
+                k,
             );
         }
 
@@ -239,6 +302,57 @@ pub(super) fn decode_core(
             }
             let current_q14 = add_sat32(pres_q14[i], lpc_pred_q10 << 4);
             s_lpc_q14[MAX_LPC_ORDER + i] = current_q14;
+            if packet_idx == 2 && frame_idx == 0 && k == 0 && i == 30 {
+                eprintln!(
+                    "DBG H8 rust sf0 sample30 output lpc_pred_q10={} pres_q14={} new_slpc_q14={}",
+                    lpc_pred_q10,
+                    pres_q14[i],
+                    current_q14
+                );
+            }
+            if packet_idx == 2 && frame_idx == 0 && k == 0 && i == 39 {
+                eprintln!(
+                    "DBG H16 rust sf0 sample39 output lpc_pred_q10={} pres_q14={} new_slpc_q14={}",
+                    lpc_pred_q10,
+                    pres_q14[i],
+                    current_q14
+                );
+            }
+            if packet_idx == 2 && frame_idx == 0 && k == 1 && i == 1 {
+                let taps: [i32; 10] = std::array::from_fn(|j| s_lpc_q14[MAX_LPC_ORDER + i - 1 - j]);
+                let coeffs: [i32; 10] = std::array::from_fn(|j| a_q12[j] as i32);
+                eprintln!(
+                    "DBG H12 rust sf1 sample1 coeffs={:?} taps={:?}",
+                    coeffs,
+                    taps
+                );
+                eprintln!(
+                    "DBG H13 rust sf1 sample1 output lpc_pred_q10={} pres_q14={} new_slpc_q14={}",
+                    lpc_pred_q10,
+                    pres_q14[i],
+                    current_q14
+                );
+            }
+            if matches!(packet_idx, 30 | 223)
+                && frame_idx == 0
+                && k == 0
+                && matches!(i, 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 30 | 31 | 39)
+            {
+                // #region agent log H23
+                eprintln!(
+                    "DBG H23 rust pkt{} sf0 sample{} pres_q14={} lpc_pred_q10={} new_slpc_q14={}",
+                    packet_idx,
+                    i,
+                    pres_q14[i],
+                    lpc_pred_q10,
+                    current_q14
+                );
+                if matches!(i, 16 | 17 | 18 | 19 | 21 | 22 | 30 | 31) {
+                    let taps: [i32; 10] = std::array::from_fn(|j| s_lpc_q14[MAX_LPC_ORDER + i - 1 - j]);
+                    eprintln!("DBG H24 rust pkt{} sf0 sample{} taps={:?}", packet_idx, i, taps);
+                }
+                // #endregion
+            }
 
             let pcm = sat16(rshift_round(smulww(current_q14, gain_q10), 8));
             output_pcm[k * subfr_length + i] = pcm;
@@ -248,7 +362,52 @@ pub(super) fn decode_core(
                 trace.pcm_head[i] = pcm;
             }
         }
+        if std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1")
+            && packet_idx == 2
+            && frame_idx == 0
+        {
+            eprintln!(
+                "R pkt2 if0 sf{} gain={} lag={} exc_Q14[0..4]={:?} sLPC_end4={:?}",
+                k,
+                gain_q16,
+                pitch_lag,
+                &pres_q14[..4.min(subfr_length)],
+                &s_lpc_q14[MAX_LPC_ORDER + subfr_length - 4..MAX_LPC_ORDER + subfr_length]
+            );
+        }
+        if matches!(packet_idx, 30 | 223) && frame_idx == 0 {
+            let relevant_start = MAX_LPC_ORDER + subfr_length - params.lpc_order;
+            let relevant_end = MAX_LPC_ORDER + subfr_length;
+            // #region agent log H22
+            eprintln!(
+                "DBG H22 rust pkt{} sf{} gain_q16={} pitch_lag={} pres4={:?} tail10={:?}",
+                packet_idx,
+                k,
+                gain_q16,
+                pitch_lag,
+                &pres_q14[..4.min(subfr_length)],
+                &s_lpc_q14[relevant_start..relevant_end]
+            );
+            // #endregion
+        }
+
+        if packet_idx == 2 && frame_idx == 0 && k == 0 {
+            let relevant_start = MAX_LPC_ORDER + subfr_length - params.lpc_order;
+            let relevant_end = MAX_LPC_ORDER + subfr_length;
+            eprintln!(
+                "DBG H14 rust sf0 relevant_tail10={:?}",
+                &s_lpc_q14[relevant_start..relevant_end]
+            );
+        }
         s_lpc_q14.copy_within(subfr_length..subfr_length + MAX_LPC_ORDER, 0);
+        if packet_idx == 2 && frame_idx == 0 && k == 0 {
+            let relevant_start = MAX_LPC_ORDER - params.lpc_order;
+            let relevant_end = MAX_LPC_ORDER;
+            eprintln!(
+                "DBG H15 rust sf1 active_state10={:?}",
+                &s_lpc_q14[relevant_start..relevant_end]
+            );
+        }
     }
 
     state.s_lpc_q14_buf.copy_from_slice(&s_lpc_q14[..MAX_LPC_ORDER]);
@@ -317,20 +476,123 @@ fn rshift_round(value: i32, shift: usize) -> i32 {
     }
 }
 
-/// Approximate `(a32 << q_res) / b32`.
+/// Compute a saturating absolute value for normalization.
+///
+/// Params: signed `value`.
+/// Returns: non-negative magnitude, saturating `i32::MIN`.
+fn abs32_for_clz(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else {
+        value.abs()
+    }
+}
+
+/// Compute the signed high word of a 64-bit product.
+///
+/// Params: signed `a32` and `b32`.
+/// Returns: arithmetic `(a32 * b32) >> 32`.
+fn smmul(a32: i32, b32: i32) -> i32 {
+    ((a32 as i64 * b32 as i64) >> 32) as i32
+}
+
+/// Left-shift with wraparound semantics.
+///
+/// Params: signed `value` and non-negative `shift`.
+/// Returns: wrapped left-shifted value.
+fn lshift_ovflw(value: i32, shift: usize) -> i32 {
+    ((value as u32) << shift) as i32
+}
+
+/// Subtract with wraparound semantics.
+///
+/// Params: signed `a` and `b`.
+/// Returns: wrapped difference.
+fn sub32_ovflw(a: i32, b: i32) -> i32 {
+    a.wrapping_sub(b)
+}
+
+/// Left-shift with saturation.
+///
+/// Params: signed `value` and non-negative `shift`.
+/// Returns: left-shifted value clamped to `i32`.
+fn lshift_sat32(value: i32, shift: usize) -> i32 {
+    if shift >= 31 {
+        if value > 0 {
+            i32::MAX
+        } else if value < 0 {
+            i32::MIN
+        } else {
+            0
+        }
+    } else {
+        value
+            .clamp(i32::MIN >> shift, i32::MAX >> shift)
+            .wrapping_shl(shift as u32)
+    }
+}
+
+/// Approximate `(a32 << q_res) / b32` using SILK's reciprocal refinement.
 ///
 /// Params: numerator `a32`, denominator `b32`, and output Q-domain `q_res`.
 /// Returns: scaled signed quotient.
 fn div32_var_q(a32: i32, b32: i32, q_res: usize) -> i32 {
-    (((a32 as i64) << q_res) / b32 as i64) as i32
+    debug_assert!(b32 != 0);
+    if a32 == 0 {
+        return 0;
+    }
+
+    let a_headrm = abs32_for_clz(a32).leading_zeros() as usize - 1;
+    let mut a32_nrm = a32 << a_headrm;
+    let b_headrm = abs32_for_clz(b32).leading_zeros() as usize - 1;
+    let b32_nrm = b32 << b_headrm;
+
+    let b32_inv = (i32::MAX >> 2) / (b32_nrm >> 16);
+    let mut result = smulwb(a32_nrm, b32_inv);
+    a32_nrm = sub32_ovflw(a32_nrm, lshift_ovflw(smmul(b32_nrm, result), 3));
+    result = smlawb(result, a32_nrm, b32_inv);
+
+    let lshift = 29isize + a_headrm as isize - b_headrm as isize - q_res as isize;
+    if lshift < 0 {
+        lshift_sat32(result, (-lshift) as usize)
+    } else if lshift < 32 {
+        result >> lshift
+    } else {
+        0
+    }
 }
 
-/// Approximate `(1 << q_res) / value`.
+/// Approximate `a32 + ((b32 * c32) >> 16)` with SILK wraparound semantics.
+///
+/// Params: accumulator `a32` and signed multiplicands `b32` and `c32`.
+/// Returns: accumulated high-word product.
+fn smlaww(a32: i32, b32: i32, c32: i32) -> i32 {
+    a32.wrapping_add(smulww(b32, c32))
+}
+
+/// Approximate `(1 << q_res) / value` using SILK's reciprocal refinement.
 ///
 /// Params: signed non-zero `value` and target result Q-domain `q_res`.
 /// Returns: reciprocal approximation in fixed-point.
 fn inverse32_var_q(value: i32, q_res: usize) -> i32 {
-    (((1i128 << q_res) + (value as i128 / 2)) / value as i128) as i32
+    debug_assert!(value != 0);
+    debug_assert!(q_res > 0);
+
+    let b_headrm = abs32_for_clz(value).leading_zeros() as usize - 1;
+    let b32_nrm = value << b_headrm;
+    let b32_inv = (i32::MAX >> 2) / (b32_nrm >> 16);
+    let mut result = b32_inv << 16;
+    let err_q32 = (((1i32 << 29) - smulwb(b32_nrm, b32_inv)) << 3) as i32;
+    result = smlaww(result, err_q32, b32_inv);
+
+    let lshift = 61isize - b_headrm as isize - q_res as isize;
+    if lshift <= 0 {
+        lshift_sat32(result, (-lshift) as usize)
+    } else if lshift < 32 {
+        result >> lshift
+    } else {
+        0
+    }
 }
 
 /// Port of `silk_LPC_analysis_filter` used for voiced re-whitening.
