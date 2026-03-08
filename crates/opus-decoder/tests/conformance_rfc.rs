@@ -1,69 +1,10 @@
+#![allow(unused_variables, unused_assignments)]
+
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use opus_decoder::{Decoder, Error};
-
-const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log";
-const DEBUG_SESSION_ID: &str = "4200c5";
-
-/// Check whether packet should emit targeted packet-delta debug logs.
-///
-/// Params: `packet_idx` absolute packet index in the vector stream.
-/// Returns: true when packet is in onset/hotspot probe set.
-fn should_trace_debug_packet(packet_idx: usize) -> bool {
-    packet_idx <= 20
-        || matches!(
-            packet_idx,
-            138
-                | 160
-                | 162
-                | 499
-                | 605
-                | 611
-                | 905
-                | 906
-                | 907
-                | 2534
-                | 3353
-                | 3536
-                | 3541
-                | 3979
-                | 3986
-                | 3992
-                | 3998
-                | 3999
-        )
-}
-
-/// Append one NDJSON debug entry to the shared debug log file.
-///
-/// Params: `run_id` run label, `hypothesis_id` tested hypothesis, `location`
-/// source marker, `message` event name, and `data_json` object string.
-/// Returns: nothing.
-fn append_debug_log(
-    run_id: &str,
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data_json: &str,
-) {
-    if let Ok(mut f) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(DEBUG_LOG_PATH)
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let line = format!(
-            "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
-            DEBUG_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
-        );
-        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-    }
-}
 
 #[derive(Debug)]
 struct Vector {
@@ -164,11 +105,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 got_pcm.extend_from_slice(&out[..written]);
                 let pkt_end = got_pcm.len();
                 packet_end_samples.push(pkt_end);
-                let expected_debug_len = if v.channels == 1 {
-                    expected_pcm.len() / 2
-                } else {
-                    expected_pcm.len()
-                };
+                    let expected_debug_len = expected_pcm.len() / (v.channels as usize);
                 if pkt_start < expected_debug_len {
                     let compare_end = pkt_end.min(expected_debug_len);
                     let mut max_delta = 0i32;
@@ -181,13 +118,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                     let mut max_expected = 0i16;
                     let mut max_got = 0i16;
                     for i in pkt_start..compare_end {
-                        let expected_i16 = if v.channels == 1 {
-                            let l = expected_pcm[2 * i] as i32;
-                            let r = expected_pcm[2 * i + 1] as i32;
-                            ((l + r) / 2) as i16
-                        } else {
-                            expected_pcm[i]
-                        };
+                        let expected_i16 = expected_pcm[i];
                         let delta = got_pcm[i] as i32 - expected_i16 as i32;
                         let abs_delta = delta.abs();
                         if abs_delta > max_delta {
@@ -219,13 +150,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                                 exp_start8_csv.push(';');
                             }
                             got_start8_csv.push_str(&got_pcm[i].to_string());
-                            if v.channels == 1 {
-                                let l = expected_pcm[2 * i] as i32;
-                                let r = expected_pcm[2 * i + 1] as i32;
-                                exp_start8_csv.push_str(&(((l + r) / 2) as i16).to_string());
-                            } else {
-                                exp_start8_csv.push_str(&expected_pcm[i].to_string());
-                            }
+                            exp_start8_csv.push_str(&expected_pcm[i].to_string());
                         }
                         let data = format!(
                             "{{\"packet_idx\":{},\"frame_size\":{},\"sample_start\":{},\"sample_end\":{},\"max_delta\":{},\"max_diff_idx\":{},\"max_diff_delta\":{},\"max_expected\":{},\"max_got\":{},\"first_diff_idx\":{},\"first_diff_delta\":{},\"first_expected\":{},\"first_got\":{},\"got_start8_csv\":\"{}\",\"exp_start8_csv\":\"{}\"}}",
@@ -412,7 +337,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
             {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -464,7 +389,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
         {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -532,7 +457,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
                 {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -559,26 +484,30 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         &expected_pcm,
         &got_pcm,
         v.channels as usize,
+        v.channels as usize,
         v.fs_hz,
     )?;
     if q0.passes_vectors() {
         return Ok(());
     }
     if let Some(alt_pcm) = &alt_pcm {
-        let q1 = opus_decoder::compare::compare_quality(
-            alt_pcm,
-            &got_pcm,
-            v.channels as usize,
-            v.fs_hz,
-        )?;
-        if q1.passes_vectors() {
-            return Ok(());
+        if alt_pcm.len() == expected_pcm.len() {
+            let q1 = opus_decoder::compare::compare_quality(
+                alt_pcm,
+                &got_pcm,
+                v.channels as usize,
+                v.channels as usize,
+                v.fs_hz,
+            )?;
+            if q1.passes_vectors() {
+                return Ok(());
+            }
+            return Err(format!(
+                "PCM mismatch vs both references (quality {:.1}% err {:.6} ; alt {:.1}% err {:.6})",
+                q0.quality_percent, q0.internal_weighted_error, q1.quality_percent, q1.internal_weighted_error
+            )
+            .into());
         }
-        return Err(format!(
-            "PCM mismatch vs both references (quality {:.1}% err {:.6} ; alt {:.1}% err {:.6})",
-            q0.quality_percent, q0.internal_weighted_error, q1.quality_percent, q1.internal_weighted_error
-        )
-        .into());
     }
 
     Err(format!(
@@ -586,6 +515,45 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         q0.quality_percent, q0.internal_weighted_error
     )
     .into())
+}
+
+/// Decide whether a packet should emit extra debug logging.
+///
+/// Params: `packet_idx` packet number in the vector stream.
+/// Returns: true when explicit packet tracing is requested.
+fn should_trace_debug_packet(packet_idx: usize) -> bool {
+    std::env::var("OPUS_TRACE_PACKET_IDX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        == Some(packet_idx)
+}
+
+/// Append one JSON debug line to the local trace log.
+///
+/// Params: `run_id`, `hypothesis_id`, `location`, `message`, and JSON `data`.
+/// Returns: nothing; errors are ignored because this is debug-only tracing.
+fn append_debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: &str,
+) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "{{\"sessionId\":\"4200c5\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+            run_id, hypothesis_id, location, message, data, ts
+        );
+        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    }
 }
 
 fn alt_dec_path(dec_path: &Path) -> Option<PathBuf> {

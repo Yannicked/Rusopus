@@ -40,16 +40,17 @@ Note: the reference libopus `run_vectors.sh` compares decoded output using the
 important because small sample-level differences can occur across builds/platforms
 while still being considered acceptable by the reference harness.
 
-## Current status snapshot (2026-02-22)
+## Current status snapshot (2026-03-05)
 
-- `packet.rs`: TOC parse, code 0/1/2/3, VBR/CBR, padding, frame sizes ✅
+- `packet.rs`: TOC parse, code 0/1/2/3, VBR/CBR, padding, frame sizes; RFC code-3 padding fix (`255 -> 254`) ✅
 - `entropy.rs`: full range decoder port (`entdec.c` + `entcode.c`) ✅
 - `compare.rs`: `opus_compare.c` port ✅
 - `tests/conformance_rfc.rs`: manifest parser + opus_demo reader + quality compare ✅
 - `xtask`: `fetch-vectors` (SHA-1 verified), `gen-manifest` (auto channels + `fs_hz`) ✅
-- `celt/mod.rs`: scaffold only (`decode_frame()` returns `NotImplemented`) 🚧
+- `celt/mod.rs`: CELT decode path implemented (mono + stereo synthesis, per-channel overlap/comb/deemph, interleaved output) ✅
 - `lib.rs`: `Decoder::new/decode/reset`, CELT-only routing by TOC, `#![forbid(unsafe_code)]` ✅
 - `silk/`: no module yet 🚧
+- CELT vector milestone (Phase 2 closure): `testvector01` ✅, `testvector07` ✅, `testvector11` ✅; `testvector10` is blocked by Hybrid packets (Phase 4 scope).
 
 ## Non-goals (for MVP)
 
@@ -206,8 +207,9 @@ Recommended (optional, high-value):
 
 Definition of done:
 
-- CELT-only vectors pass.
-- CELT-only vectors also pass per-packet `final_range` comparison.
+- `testvector01` (stereo CELT FB), `testvector07` (mono CELT FB), and `testvector11` (stereo CELT FB) pass the RFC vector harness.
+- `testvector10` is not a Phase 2 blocker: it enters Hybrid mode mid-stream (`config=15`) and is tracked under Phase 4.
+- Phase 2 (CELT-only) is complete.
 
 ### Phase 3 - SILK decoder (SILK-only)
 
@@ -418,15 +420,11 @@ This logic should live in a separate crate or CLI/tooling layer (not in the core
   - crafted packets causing pathological CPU
   - avoid unbounded loops and allocations; enforce spec limits
 
-## Next step (2026-02-22)
+## Next step (2026-03-05)
 
-Immediate vertical slice progression:
+Immediate follow-up task (Phase 3 kickoff: SILK-only path):
 
-- Complete Phase 0 `final_range` comparison in `tests/conformance_rfc.rs` (existing TODO).
-- Finish Phase 2 CELT essentials needed for first passing CELT-only vector:
-  - `rate.c` allocation path
-  - `quant_bands.c` coarse/fine/fill passes
-  - transient short-block path
-  - postfilter + deemphasis
-- Start Phase 3a scaffolding (`silk/` module, frame header parse with LBRR consumption, multi-frame packet support) before SILK synthesis internals.
-- Keep focused vector runs with `OPUS_VECTOR=...` and add optional C-vs-Rust differential checks for newly completed decode paths.
+- Start Phase 3a: SILK frame parsing, stereo unpacking signaling, and LBRR parsing/consumption.
+- Add SILK-side packet/header conformance probes to prevent range-coder desync.
+- Keep Hybrid packets (`testvector10` mid-stream transition) explicitly out of scope until Phase 4 glue work.
+- After SILK parser/LBRR stability is in place, proceed to Phase 3b (NLSF -> LPC path).

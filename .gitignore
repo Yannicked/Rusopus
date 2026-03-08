@@ -1,3 +1,6 @@
 .cursor/
 crates/opus-cli/
 target/
+.vscode/
+*.pcm
+/tmp/

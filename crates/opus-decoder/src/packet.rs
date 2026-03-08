@@ -195,7 +195,9 @@ fn parse_padding_len(data: &[u8]) -> Result<(usize, usize), Error> {
         }
         let p = data[used] as usize;
         used += 1;
-        pad = pad.saturating_add(p);
+        // RFC 6716 code-3 padding: each 255 byte contributes 254 and continues.
+        let add = if p == 255 { 254 } else { p };
+        pad = pad.saturating_add(add);
         if p != 255 {
             break;
         }

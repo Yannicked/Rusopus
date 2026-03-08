@@ -1,0 +1,788 @@
+//! SILK decoder scaffolding (Phase 3a).
+//!
+//! This module focuses on bitstream parsing and entropy consumption for SILK
+//! packet headers (VAD/LBRR/stereo signaling), with zeroed synthesis output.
+
+use crate::entropy::EcDec;
+use crate::Error;
+
+mod decode_core;
+mod entropy_tables;
+mod gain;
+mod lbrr;
+mod lpc;
+mod ltp;
+mod nlsf;
+mod pitch;
+mod resampler;
+mod resampler_private;
+mod resampler_rom;
+mod stereo;
+mod tables;
+
+const MAX_INTERNAL_FRAMES: usize = 3;
+const MAX_LPC_HALVES: usize = 2;
+const MAX_API_FRAME_SAMPLES_48K: usize = 960 * MAX_INTERNAL_FRAMES;
+
+/// Result of decoding one SILK Opus frame.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SilkFrameDecode {
+    /// Number of decoded samples per output channel.
+    pub samples_per_channel: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChannelHeader {
+    vad_flags: [bool; MAX_INTERNAL_FRAMES],
+    lbrr_flags: [bool; MAX_INTERNAL_FRAMES],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ParsedHeader {
+    channels: [ChannelHeader; 2],
+}
+
+/// Stateful SILK decoder shell used by top-level Opus decoder.
+#[derive(Debug, Clone)]
+pub(crate) struct SilkDecoder {
+    fs_hz: u32,
+    channels: u8,
+    final_range: u32,
+    lbrr_state: [lbrr::ChannelState; 2],
+    core_state: [decode_core::SilkChannelState; 2],
+    resampler_state: [Option<resampler::SilkResampler>; 2],
+    prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
+    pred_coef_q12:
+        [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+    first_frame_after_reset: [bool; 2],
+    prev_decode_only_middle: bool,
+}
+
+impl SilkDecoder {
+    /// Create SILK decoder state.
+    ///
+    /// Params: `fs_hz` is Opus API output sample rate, `channels` is output channels.
+    /// Returns: initialized SILK decoder state with cleared range state.
+    pub fn new(fs_hz: u32, channels: u8) -> Self {
+        Self {
+            fs_hz,
+            channels,
+            final_range: 0,
+            lbrr_state: [lbrr::ChannelState::default(), lbrr::ChannelState::default()],
+            core_state: [
+                decode_core::SilkChannelState::default(),
+                decode_core::SilkChannelState::default(),
+            ],
+            resampler_state: [None, None],
+            prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
+            pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+            first_frame_after_reset: [true; 2],
+            prev_decode_only_middle: false,
+        }
+    }
+
+    /// Reset SILK decoder persistent state.
+    ///
+    /// Params: none.
+    /// Returns: nothing.
+    pub fn reset(&mut self) {
+        self.final_range = 0;
+        self.lbrr_state = [lbrr::ChannelState::default(), lbrr::ChannelState::default()];
+        self.core_state = [
+            decode_core::SilkChannelState::default(),
+            decode_core::SilkChannelState::default(),
+        ];
+        self.resampler_state = [None, None];
+        self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
+        self.pred_coef_q12 = [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
+        self.first_frame_after_reset = [true; 2];
+        self.prev_decode_only_middle = false;
+    }
+
+    /// Return SILK range coder final state from last decoded frame.
+    ///
+    /// Params: none.
+    /// Returns: `final_range` value for conformance checks.
+    pub fn final_range(&self) -> u32 {
+        self.final_range
+    }
+
+    /// Decode one SILK Opus frame payload.
+    ///
+    /// Params: `frame` payload bytes, `frame_samples_48k` frame duration in 48 kHz samples,
+    /// `config` TOC config, `packet_channels` coded channels, `_packet_idx` debug packet index,
+    /// and `out` interleaved output slice.
+    /// Returns: decoded sample count per output channel at the API output rate.
+    pub fn decode_frame(
+        &mut self,
+        frame: &[u8],
+        frame_samples_48k: usize,
+        config: u8,
+        packet_channels: u8,
+        packet_idx: usize,
+        out: &mut [i16],
+    ) -> Result<SilkFrameDecode, Error> {
+        if !matches!(packet_channels, 1 | 2) {
+            return Err(Error::BadPacket);
+        }
+
+        let internal_fs_hz = silk_internal_fs_hz(config)?;
+        let (internal_frames, nb_subfr, frame_length) =
+            internal_frame_shape(frame_samples_48k, internal_fs_hz)?;
+        let samples_per_channel = (frame_samples_48k * self.fs_hz as usize) / 48_000;
+        let needed = samples_per_channel * self.channels as usize;
+        if out.len() < needed {
+            return Err(Error::OutputTooSmall {
+                needed,
+                got: out.len(),
+            });
+        }
+
+        let mut dec = EcDec::new(frame);
+        let mut internal_pcm = [[0i16; MAX_INTERNAL_FRAMES * tables::MAX_FRAME_LENGTH]; 2];
+        let mut resampled_pcm = [[0i16; MAX_API_FRAME_SAMPLES_48K]; 2];
+        let trace_pkt0 = packet_idx == 0 && silk_trace_enabled();
+        if trace_pkt0 {
+            trace_checkpoint(&dec, packet_idx, "init");
+        }
+        for state in self.lbrr_state.iter_mut().take(packet_channels as usize) {
+            lbrr::configure_channel_state(state, internal_fs_hz / 1000, nb_subfr);
+        }
+        if self.fs_hz == 48_000 {
+            for ch in 0..packet_channels as usize {
+                let needs_reset = self.resampler_state[ch]
+                    .as_ref()
+                    .is_none_or(|state| !state.matches(internal_fs_hz, self.fs_hz));
+                if needs_reset {
+                    self.resampler_state[ch] =
+                        Some(resampler::SilkResampler::new(internal_fs_hz, self.fs_hz)?);
+                }
+            }
+        }
+        let parsed = parse_header(
+            &mut dec,
+            packet_channels as usize,
+            internal_frames,
+            packet_idx,
+            trace_pkt0,
+        )?;
+        consume_lbrr_payload(
+            &mut dec,
+            &parsed,
+            packet_channels as usize,
+            internal_frames,
+            &mut self.lbrr_state,
+            frame_length,
+            packet_idx,
+            trace_pkt0,
+        )?;
+        if trace_pkt0 {
+            trace_checkpoint(&dec, packet_idx, "after_lbrr_consume");
+        }
+        consume_main_payload(
+            &mut dec,
+            &parsed,
+            packet_channels as usize,
+            internal_frames,
+            &mut self.lbrr_state,
+            frame_length,
+            &mut self.prev_nlsf_q15,
+            &mut self.pred_coef_q12,
+            &mut self.first_frame_after_reset,
+            &mut self.core_state,
+            &mut internal_pcm,
+            &mut self.prev_decode_only_middle,
+            packet_idx,
+            trace_pkt0,
+        )?;
+        if trace_pkt0 {
+            trace_checkpoint(&dec, packet_idx, "after_main_decode");
+        }
+
+        out[..needed].fill(0);
+        let internal_samples_per_channel = internal_frames * frame_length;
+        if self.fs_hz == 48_000 {
+            for ch in 0..packet_channels as usize {
+                if let Some(resampler) = self.resampler_state[ch].as_mut() {
+                    let expected = resampler.output_len(internal_samples_per_channel);
+                    debug_assert_eq!(expected, samples_per_channel);
+                    let written = resampler.process(
+                        &internal_pcm[ch][..internal_samples_per_channel],
+                        &mut resampled_pcm[ch][..samples_per_channel],
+                    );
+                    debug_assert_eq!(written, samples_per_channel);
+                }
+            }
+        }
+        if self.fs_hz == 48_000 {
+            for n in 0..samples_per_channel {
+                let left = resampled_pcm[0][n];
+                match self.channels {
+                    1 => out[n] = left,
+                    2 => {
+                        out[2 * n] = left;
+                        out[2 * n + 1] = if packet_channels == 2 {
+                            resampled_pcm[1][n]
+                        } else {
+                            left
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            for n in 0..internal_samples_per_channel.min(samples_per_channel) {
+                let left = internal_pcm[0][n];
+                match self.channels {
+                    1 => out[n] = left,
+                    2 => {
+                        out[2 * n] = left;
+                        out[2 * n + 1] = if packet_channels == 2 {
+                            internal_pcm[1][n]
+                        } else {
+                            left
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        self.final_range = dec.final_range();
+        if trace_pkt0 {
+            trace_checkpoint(&dec, packet_idx, "after_decode");
+        }
+        if dec.is_error() {
+            return Err(Error::BadPacket);
+        }
+
+        if lbrr::any_lbrr(
+            &[parsed.channels[0].lbrr_flags, parsed.channels[1].lbrr_flags],
+            packet_channels as usize,
+        ) {
+            debug_trace!("silk: consumed LBRR side payload");
+        }
+
+        Ok(SilkFrameDecode { samples_per_channel })
+    }
+}
+
+/// Parse SILK packet header signaling used before core frame decode.
+///
+/// Params: `dec` shared entropy decoder, `packet_channels` coded channels, and
+/// `internal_frames` count of 20 ms SILK-internal frames (1/2/3).
+/// Returns: parsed VAD/LBRR signaling snapshot for the frame.
+fn parse_header(
+    dec: &mut EcDec<'_>,
+    packet_channels: usize,
+    internal_frames: usize,
+    packet_idx: usize,
+    trace_pkt0: bool,
+) -> Result<ParsedHeader, Error> {
+    let mut parsed = ParsedHeader::default();
+
+    for ch in 0..packet_channels {
+        for i in 0..internal_frames {
+            parsed.channels[ch].vad_flags[i] = dec.dec_bit_logp(1);
+        }
+        if trace_pkt0 {
+            trace_checkpoint(
+                dec,
+                packet_idx,
+                &format!("after_vad_flags_ch{}", ch),
+            );
+        }
+
+        let has_lbrr = dec.dec_bit_logp(1);
+        parsed.channels[ch].lbrr_flags = unpack_lbrr_flags(dec, has_lbrr, internal_frames)?;
+        if trace_pkt0 {
+            trace_checkpoint(
+                dec,
+                packet_idx,
+                &format!("after_lbrr_flag_ch{}", ch),
+            );
+        }
+    }
+
+    Ok(parsed)
+}
+
+/// Consume LBRR payload side information for all flagged internal frames.
+///
+/// Params: entropy decoder `dec`, parsed `header`, coded channel count,
+/// `internal_frames`, mutable per-channel `states`, and internal `frame_length`.
+/// Returns: nothing on success, `BadPacket` on malformed entropy payload.
+fn consume_lbrr_payload(
+    dec: &mut EcDec<'_>,
+    header: &ParsedHeader,
+    packet_channels: usize,
+    internal_frames: usize,
+    states: &mut [lbrr::ChannelState; 2],
+    frame_length: usize,
+    packet_idx: usize,
+    trace_pkt0: bool,
+) -> Result<(), Error> {
+    for i in 0..internal_frames {
+        for (ch, state) in states.iter_mut().enumerate().take(packet_channels) {
+            if !header.channels[ch].lbrr_flags[i] {
+                continue;
+            }
+            if packet_channels == 2 && ch == 0 {
+                let _ = stereo::decode_stereo_pred(dec);
+                if !header.channels[1].lbrr_flags[i] {
+                    let _ = stereo::decode_mid_only(dec);
+                }
+            }
+            let cond = if i > 0 && header.channels[ch].lbrr_flags[i - 1] {
+                lbrr::CondCoding::Conditionally
+            } else {
+                lbrr::CondCoding::Independently
+            };
+            let side = lbrr::decode_indices(
+                state,
+                dec,
+                header.channels[ch].vad_flags[i],
+                true,
+                cond,
+            )?;
+            let _ = lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
+            if trace_pkt0 {
+                trace_checkpoint(
+                    dec,
+                    packet_idx,
+                    &format!("after_lbrr_i{}_ch{}", i, ch),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Consume main SILK frame side information and pulses for all internal frames.
+///
+/// Params: entropy decoder `dec`, parsed packet `header`, coded channel count,
+/// `internal_frames`, mutable per-channel `states`, internal `frame_length`,
+/// packet-level `prev_decode_only_middle`, `packet_idx`, and tracing flag.
+/// Returns: nothing on success, `BadPacket` on malformed entropy payload.
+fn consume_main_payload(
+    dec: &mut EcDec<'_>,
+    header: &ParsedHeader,
+    packet_channels: usize,
+    internal_frames: usize,
+    states: &mut [lbrr::ChannelState; 2],
+    frame_length: usize,
+    prev_nlsf_q15: &mut [[i16; tables::MAX_LPC_ORDER]; 2],
+    pred_coef_q12:
+        &mut [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+    first_frame_after_reset: &mut [bool; 2],
+    core_state: &mut [decode_core::SilkChannelState; 2],
+    internal_pcm: &mut [[i16; MAX_INTERNAL_FRAMES * tables::MAX_FRAME_LENGTH]; 2],
+    prev_decode_only_middle: &mut bool,
+    packet_idx: usize,
+    trace_pkt0: bool,
+) -> Result<(), Error> {
+    for i in 0..internal_frames {
+        let mut decode_only_middle = false;
+        if packet_channels == 2 {
+            let pred_q13 = stereo::decode_stereo_pred(dec);
+            decode_only_middle = !header.channels[1].vad_flags[i] && stereo::decode_mid_only(dec);
+            if trace_pkt0 {
+                trace_checkpoint(dec, packet_idx, &format!("after_stereo_i{}", i));
+            }
+            debug_trace!(
+                "silk: stereo signaling i={} pred0={} pred1={} mid_only={}",
+                i,
+                pred_q13[0],
+                pred_q13[1],
+                decode_only_middle
+            );
+        }
+
+        for ch in 0..packet_channels {
+            if ch == 1 && decode_only_middle {
+                continue;
+            }
+            let cond = if i == 0 {
+                if ch > 0 && *prev_decode_only_middle {
+                    lbrr::CondCoding::IndependentlyNoLtpScaling
+                } else {
+                    lbrr::CondCoding::Independently
+                }
+            } else if ch > 0 && *prev_decode_only_middle {
+                lbrr::CondCoding::IndependentlyNoLtpScaling
+            } else {
+                lbrr::CondCoding::Conditionally
+            };
+            let side = lbrr::decode_indices(
+                &mut states[ch],
+                dec,
+                header.channels[ch].vad_flags[i],
+                false,
+                cond,
+            )?;
+            update_lpc_from_nlsf(
+                states[ch].fs_khz,
+                &side.nlsf,
+                &mut prev_nlsf_q15[ch],
+                &mut pred_coef_q12[ch][i],
+                &mut first_frame_after_reset[ch],
+            );
+            if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
+                trace_lpc(
+                    packet_idx,
+                    ch,
+                    i,
+                    "pred0",
+                    &pred_coef_q12[ch][i][0],
+                    states[ch].fs_khz,
+                );
+                trace_lpc(
+                    packet_idx,
+                    ch,
+                    i,
+                    "pred1",
+                    &pred_coef_q12[ch][i][1],
+                    states[ch].fs_khz,
+                );
+            }
+            let pulses = lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
+            let frame_params = decode_core::SilkFrameParams {
+                signal_type: side.signal_type,
+                quant_offset_type: side.quant_offset_type,
+                gain_indices: side.gain_indices,
+                lag_index: side.lag_index,
+                contour_index: side.contour_index,
+                per_index: side.per_index,
+                ltp_indices: side.ltp_indices,
+                ltp_scale_index: side.ltp_scale_index,
+                seed: side.seed,
+                pulses,
+                conditional: matches!(cond, lbrr::CondCoding::Conditionally),
+                frame_length,
+                nb_subfr: states[ch].nb_subfr,
+                fs_khz: states[ch].fs_khz,
+                lpc_order: tables::nlsf_codebook(states[ch].fs_khz).order,
+            };
+            let pcm_range = i * frame_length..(i + 1) * frame_length;
+            let trace = decode_core::decode_core(
+                &frame_params,
+                &pred_coef_q12[ch][i],
+                &mut internal_pcm[ch][pcm_range],
+                &mut core_state[ch],
+            );
+            if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
+                trace_core(packet_idx, "exc_Q14", &trace.exc_q14_head);
+                trace_core(packet_idx, "sLPC_Q14", &trace.s_lpc_q14_head);
+            }
+            if trace_pkt0 {
+                trace_checkpoint(dec, packet_idx, &format!("after_main_i{}_ch{}", i, ch));
+            }
+        }
+
+        *prev_decode_only_middle = decode_only_middle;
+    }
+    Ok(())
+}
+
+/// Check whether SILK entropy tracing is enabled.
+///
+/// Params: none.
+/// Returns: true when `OPUS_SILK_TRACE=1` is set.
+fn silk_trace_enabled() -> bool {
+    std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1")
+}
+
+/// Emit packet-0 SILK entropy checkpoint with tell/tell_frac/rng.
+///
+/// Params: immutable entropy decoder `dec`, `packet_idx`, and textual `label`.
+/// Returns: nothing.
+fn trace_checkpoint(dec: &EcDec<'_>, packet_idx: usize, label: &str) {
+    eprintln!(
+        "SILK pkt{} [{}] tell={} tell_frac={} rng={:#010x}",
+        packet_idx,
+        label,
+        dec.tell(),
+        dec.tell_frac(),
+        dec.rng()
+    );
+}
+
+/// Decode, optionally interpolate, and convert one NLSF vector to LPC halves.
+///
+/// Params: internal `fs_khz`, decoded `nlsf_indices`, mutable `prev_nlsf_q15`,
+/// mutable `pred_coef_q12`, and per-channel `first_frame_after_reset`.
+/// Returns: nothing; previous NLSF and both LPC halves are updated in place.
+fn update_lpc_from_nlsf(
+    fs_khz: u32,
+    nlsf_indices: &lbrr::DecodedNlsfIndices,
+    prev_nlsf_q15: &mut [i16; tables::MAX_LPC_ORDER],
+    pred_coef_q12: &mut [[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES],
+    first_frame_after_reset: &mut bool,
+) {
+    let codebook = tables::nlsf_codebook(fs_khz);
+    let order = codebook.order;
+    let mut curr_nlsf_q15 = [0i16; tables::MAX_LPC_ORDER];
+    nlsf::nlsf_decode(
+        &mut curr_nlsf_q15[..order],
+        &nlsf_indices.values[..order + 1],
+        codebook,
+    );
+    lpc::nlsf2a(&mut pred_coef_q12[1][..order], &curr_nlsf_q15[..order], order);
+
+    let interp_coef_q2 = if *first_frame_after_reset {
+        4
+    } else {
+        nlsf_indices.interp_coef_q2
+    };
+    if interp_coef_q2 < 4 {
+        let mut interp_nlsf_q15 = [0i16; tables::MAX_LPC_ORDER];
+        for i in 0..order {
+            let delta = curr_nlsf_q15[i] as i32 - prev_nlsf_q15[i] as i32;
+            interp_nlsf_q15[i] = (prev_nlsf_q15[i] as i32 + ((interp_coef_q2 as i32 * delta) >> 2)) as i16;
+        }
+        lpc::nlsf2a(&mut pred_coef_q12[0][..order], &interp_nlsf_q15[..order], order);
+    } else {
+        let pred1 = pred_coef_q12[1];
+        pred_coef_q12[0][..order].copy_from_slice(&pred1[..order]);
+    }
+
+    prev_nlsf_q15[..order].copy_from_slice(&curr_nlsf_q15[..order]);
+    *first_frame_after_reset = false;
+}
+
+/// Emit packet-0 LPC trace for one channel/frame half.
+///
+/// Params: `packet_idx`, coded `channel`, internal frame `frame_idx`, `label`,
+/// LPC slice `lpc_q12`, and internal `fs_khz`.
+/// Returns: nothing.
+fn trace_lpc(packet_idx: usize, channel: usize, frame_idx: usize, label: &str, lpc_q12: &[i16], fs_khz: u32) {
+    let order = tables::nlsf_codebook(fs_khz).order;
+    let coeffs = lpc_q12[..order]
+        .iter()
+        .map(i16::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "SILK pkt{} LPC ch{} i{} {}_q12: {}",
+        packet_idx, channel, frame_idx, label, coeffs
+    );
+}
+
+/// Emit packet-0 SILK core trace for excitation or synthesis state.
+///
+/// Params: `packet_idx`, textual `label`, and signed sample `values`.
+/// Returns: nothing.
+fn trace_core(packet_idx: usize, label: &str, values: &[i32; 8]) {
+    let rendered = values.iter().map(i32::to_string).collect::<Vec<_>>().join(" ");
+    eprintln!("SILK pkt{} {}[0..8]: {}", packet_idx, label, rendered);
+}
+
+/// Decode and expand LBRR per-internal-frame flags for one coded channel.
+///
+/// Params: `dec` entropy decoder, `has_lbrr` packet-level LBRR present bit, and
+/// `internal_frames` number of SILK-internal frames.
+/// Returns: fixed-size LBRR flag array with active entries in `[0..internal_frames)`.
+fn unpack_lbrr_flags(
+    dec: &mut EcDec<'_>,
+    has_lbrr: bool,
+    internal_frames: usize,
+) -> Result<[bool; MAX_INTERNAL_FRAMES], Error> {
+    if !has_lbrr {
+        return Ok([false; MAX_INTERNAL_FRAMES]);
+    }
+
+    if internal_frames == 1 {
+        return Ok([true, false, false]);
+    }
+
+    let icdf = tables::lbrr_flags_icdf(internal_frames).ok_or(Error::BadPacket)?;
+    let symbol = dec.dec_icdf(icdf, 8) as u32 + 1;
+    Ok(unpack_lbrr_symbol(symbol, internal_frames))
+}
+
+/// Expand packed LBRR symbol bits to boolean frame flags.
+///
+/// Params: `symbol` packed bit mask and `internal_frames` active frame count.
+/// Returns: fixed-size LBRR flag array with decoded bits in low indices.
+fn unpack_lbrr_symbol(symbol: u32, internal_frames: usize) -> [bool; MAX_INTERNAL_FRAMES] {
+    let mut out = [false; MAX_INTERNAL_FRAMES];
+    for (i, flag) in out.iter_mut().take(internal_frames).enumerate() {
+        *flag = ((symbol >> i) & 1) != 0;
+    }
+    out
+}
+
+/// Map Opus TOC config (SILK-only) to SILK internal decode sample rate.
+///
+/// Params: `config` is TOC config value `(toc >> 3) & 0x1f`.
+/// Returns: internal SILK sample rate in Hz (8000/12000/16000).
+fn silk_internal_fs_hz(config: u8) -> Result<u32, Error> {
+    match config >> 2 {
+        0 => Ok(8_000),
+        1 => Ok(12_000),
+        2 => Ok(16_000),
+        _ => Err(Error::BadPacket),
+    }
+}
+
+/// Derive SILK internal frame shape from Opus frame duration.
+///
+/// Params: `frame_samples_48k` Opus frame size at 48 kHz and `internal_fs_hz`.
+/// Returns: tuple `(internal_frames, nb_subfr, frame_length_samples)`.
+fn internal_frame_shape(
+    frame_samples_48k: usize,
+    internal_fs_hz: u32,
+) -> Result<(usize, usize, usize), Error> {
+    let fs_khz = (internal_fs_hz / 1000) as usize;
+    match frame_samples_48k {
+        480 => Ok((1, 2, 10 * fs_khz)),
+        960 => Ok((1, 4, 20 * fs_khz)),
+        1_920 => Ok((2, 4, 20 * fs_khz)),
+        2_880 => Ok((3, 4, 20 * fs_khz)),
+        _ => Err(Error::BadPacket),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Decoder;
+    use std::fs;
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+
+    const TV02_PKT0_LPC_Q12: [i16; 10] = [5041, -1246, 1017, -614, 431, -560, 131, -357, 284, -46];
+
+    #[test]
+    fn maps_silk_internal_sample_rates() {
+        assert_eq!(silk_internal_fs_hz(0).unwrap(), 8_000);
+        assert_eq!(silk_internal_fs_hz(3).unwrap(), 8_000);
+        assert_eq!(silk_internal_fs_hz(4).unwrap(), 12_000);
+        assert_eq!(silk_internal_fs_hz(7).unwrap(), 12_000);
+        assert_eq!(silk_internal_fs_hz(8).unwrap(), 16_000);
+        assert_eq!(silk_internal_fs_hz(11).unwrap(), 16_000);
+        assert!(silk_internal_fs_hz(12).is_err());
+    }
+
+    #[test]
+    fn maps_internal_frame_counts() {
+        assert_eq!(internal_frame_shape(480, 8_000).unwrap(), (1, 2, 80));
+        assert_eq!(internal_frame_shape(960, 8_000).unwrap(), (1, 4, 160));
+        assert_eq!(internal_frame_shape(1_920, 12_000).unwrap(), (2, 4, 240));
+        assert_eq!(internal_frame_shape(2_880, 16_000).unwrap(), (3, 4, 320));
+        assert!(internal_frame_shape(2_400, 12_000).is_err());
+    }
+
+    #[test]
+    fn unpacks_lbrr_bitfield() {
+        assert_eq!(unpack_lbrr_symbol(0b001, 3), [true, false, false]);
+        assert_eq!(unpack_lbrr_symbol(0b011, 3), [true, true, false]);
+        assert_eq!(unpack_lbrr_symbol(0b101, 3), [true, false, true]);
+    }
+
+    #[test]
+    fn phase3a_decode_returns_zeroed_audio() {
+        let mut silk = SilkDecoder::new(48_000, 1);
+        let mut out = vec![123i16; 960];
+        let result = silk.decode_frame(&[0; 8], 960, 0, 1, 0, &mut out).unwrap();
+        assert_eq!(result.samples_per_channel, 960);
+        assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn testvector02_pkt0_nlsf_to_lpc_matches_cref() {
+        let packet = read_first_opus_demo_packet(&vectors_dir().join("testvector02.bit"));
+        let mut decoder = Decoder::new(48_000, 2).unwrap();
+        let mut out = vec![0i16; decoder.max_frame_size_per_channel() * 2];
+        let samples = decoder.decode(Some(&packet), &mut out).unwrap();
+        assert_eq!(samples, 2880);
+        assert_eq!(decoder.final_range(), 0x5037_3c71);
+        assert_eq!(&decoder.silk.pred_coef_q12[0][0][0][..10], &TV02_PKT0_LPC_Q12);
+        assert_eq!(&decoder.silk.pred_coef_q12[0][0][1][..10], &TV02_PKT0_LPC_Q12);
+    }
+
+    #[test]
+    fn testvector02_final_range_matches_reference_for_all_packets() {
+        let packets = read_opus_demo_stream(&vectors_dir().join("testvector02.bit"));
+        let mut decoder = Decoder::new(48_000, 2).unwrap();
+        let mut out = vec![0i16; decoder.max_frame_size_per_channel() * 2];
+        for (packet_idx, packet) in packets.iter().enumerate() {
+            let _samples = decoder.decode(Some(&packet.payload), &mut out).unwrap();
+            assert_eq!(
+                decoder.final_range(),
+                packet.expected_final_range,
+                "packet {packet_idx} final_range"
+            );
+        }
+    }
+
+    /// Resolve the local RFC vector directory used by decoder tests.
+    ///
+    /// Params: none.
+    /// Returns: absolute path to `testdata/opus_testvectors`.
+    fn vectors_dir() -> PathBuf {
+        if let Ok(path) = std::env::var("OPUS_TESTVECTORS_DIR") {
+            return PathBuf::from(path);
+        }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/opus_testvectors")
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// Read the first packet payload from an `opus_demo` `.bit` stream.
+    ///
+    /// Params: absolute `path` to the vector stream file.
+    /// Returns: first packet payload bytes.
+    fn read_first_opus_demo_packet(path: &Path) -> Vec<u8> {
+        let mut file = fs::File::open(path).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let packet_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        bytes[8..8 + packet_len].to_vec()
+    }
+
+    /// Read an `opus_demo` `.bit` stream into packet payloads plus expected ranges.
+    ///
+    /// Params: absolute `path` to the `.bit` vector file.
+    /// Returns: ordered packet list with payloads and reference `final_range`.
+    fn read_opus_demo_stream(path: &Path) -> Vec<DemoPacket> {
+        let mut file = fs::File::open(path).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let mut packets = Vec::new();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let packet_len = u32::from_be_bytes([
+                bytes[index],
+                bytes[index + 1],
+                bytes[index + 2],
+                bytes[index + 3],
+            ]) as usize;
+            index += 4;
+            let expected_final_range = u32::from_be_bytes([
+                bytes[index],
+                bytes[index + 1],
+                bytes[index + 2],
+                bytes[index + 3],
+            ]);
+            index += 4;
+            let payload = bytes[index..index + packet_len].to_vec();
+            index += packet_len;
+            packets.push(DemoPacket {
+                payload,
+                expected_final_range,
+            });
+        }
+        packets
+    }
+
+    /// One `opus_demo` packet plus its reference range coder state.
+    #[derive(Debug, Clone)]
+    struct DemoPacket {
+        /// Encoded Opus payload bytes.
+        payload: Vec<u8>,
+        /// Reference decoder final range after decoding the packet.
+        expected_final_range: u32,
+    }
+}

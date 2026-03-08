@@ -51,4 +51,3 @@ pub(crate) fn ec_laplace_decode(dec: &mut EcDec<'_>, fs: u32, decay: u32) -> i32
     dec.update(fl, fh, 32_768);
     val
 }
-

@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "opus-cli"
-version = "0.1.0"
-dependencies = [
- "opus-decoder",
-]
-
-[[package]]
 name = "opus-decoder"
 version = "0.1.0"
 

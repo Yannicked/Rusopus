@@ -118,4 +118,3 @@ pub(crate) fn decode_pulses(dec: &mut EcDec<'_>, n: usize, k: usize) -> PulseDec
         index: idx,
     }
 }
-
