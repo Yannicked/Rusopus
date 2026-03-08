@@ -4,8 +4,8 @@ use super::gain;
 use super::ltp;
 use super::pitch;
 use super::tables::{
-    LTP_MEM_LENGTH_MS, MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_NB_SUBFR, MAX_SUB_FRAME_LENGTH,
-    QUANTIZATION_OFFSETS_Q10, QUANT_LEVEL_ADJUST_Q10,
+    LTP_MEM_LENGTH_MS, LTP_ORDER, MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_NB_SUBFR,
+    MAX_SUB_FRAME_LENGTH, QUANTIZATION_OFFSETS_Q10, QUANT_LEVEL_ADJUST_Q10,
 };
 
 const TYPE_VOICED: i32 = 2;
@@ -103,6 +103,9 @@ pub(super) fn decode_core(
     state: &mut SilkChannelState,
 ) -> CoreTrace {
     let subfr_length = params.frame_length / params.nb_subfr;
+    let ltp_mem_length = params.fs_khz as usize * LTP_MEM_LENGTH_MS;
+    let nlsf_interpolation_flag =
+        lpc_coeffs_q12[0][..params.lpc_order] != lpc_coeffs_q12[1][..params.lpc_order];
     let gains_q16 = gain::decode_gains(
         &params.gain_indices[..params.nb_subfr],
         &mut state.last_gain_index,
@@ -119,7 +122,7 @@ pub(super) fn decode_core(
     } else {
         [0; MAX_NB_SUBFR]
     };
-    let (ltp_coeffs_q14, _ltp_scale_q14) = if params.signal_type == TYPE_VOICED {
+    let (ltp_coeffs_q14, ltp_scale_q14) = if params.signal_type == TYPE_VOICED {
         ltp::decode_ltp_coeffs(
             params.per_index,
             &params.ltp_indices,
@@ -156,20 +159,58 @@ pub(super) fn decode_core(
 
     let mut s_lpc_q14 = [0i32; MAX_LPC_ORDER + MAX_SUB_FRAME_LENGTH];
     s_lpc_q14[..MAX_LPC_ORDER].copy_from_slice(&state.s_lpc_q14_buf);
+    let mut s_ltp = [0i16; MAX_FRAME_LENGTH];
     let mut ltp_history_q15 = [0i32; MAX_FRAME_LENGTH * 2];
-    let mut ltp_buf_idx = params.fs_khz as usize * LTP_MEM_LENGTH_MS;
+    let mut ltp_buf_idx = ltp_mem_length;
 
     for k in 0..params.nb_subfr {
         let a_q12 = &lpc_coeffs_q12[k >> 1];
+        let gain_q16 = gains_q16[k];
         let gain_q10 = gains_q16[k] >> 6;
+        let pitch_lag = pitch_lags[k];
+        let mut inv_gain_q31 = inverse32_var_q(gain_q16, 47);
+        let gain_adj_q16 = if gain_q16 != state.prev_gain_q16 {
+            div32_var_q(state.prev_gain_q16, gain_q16, 16)
+        } else {
+            1 << 16
+        };
 
-        if gains_q16[k] != state.prev_gain_q16 {
-            let gain_adj_q16 = div32_var_q(state.prev_gain_q16, gains_q16[k], 16);
+        if gain_q16 != state.prev_gain_q16 {
             for sample in s_lpc_q14.iter_mut().take(MAX_LPC_ORDER) {
                 *sample = smulww(gain_adj_q16, *sample);
             }
         }
-        state.prev_gain_q16 = gains_q16[k];
+        state.prev_gain_q16 = gain_q16;
+
+        if params.signal_type == TYPE_VOICED {
+            if k == 0 || (k == 2 && nlsf_interpolation_flag) {
+                let start_idx = ltp_mem_length - pitch_lag as usize - params.lpc_order - (LTP_ORDER / 2);
+                if k == 2 {
+                    let copy_len = 2 * subfr_length;
+                    state.out_buf[ltp_mem_length..ltp_mem_length + copy_len]
+                        .copy_from_slice(&output_pcm[..copy_len]);
+                }
+                lpc_analysis_filter(
+                    &mut s_ltp[start_idx..ltp_mem_length],
+                    &state.out_buf[start_idx + k * subfr_length..start_idx + k * subfr_length + (ltp_mem_length - start_idx)],
+                    a_q12,
+                    ltp_mem_length - start_idx,
+                    params.lpc_order,
+                );
+                if k == 0 {
+                    inv_gain_q31 = (smulwb(inv_gain_q31, ltp_scale_q14) << 2) as i32;
+                }
+                for i in 0..(pitch_lag as usize + LTP_ORDER / 2) {
+                    ltp_history_q15[ltp_buf_idx - i - 1] =
+                        smulwb(inv_gain_q31, s_ltp[ltp_mem_length - i - 1] as i32);
+                }
+            } else if gain_adj_q16 != (1 << 16) {
+                for i in 0..(pitch_lag as usize + LTP_ORDER / 2) {
+                    ltp_history_q15[ltp_buf_idx - i - 1] =
+                        smulww(gain_adj_q16, ltp_history_q15[ltp_buf_idx - i - 1]);
+                }
+            }
+        }
 
         let subframe_range = k * subfr_length..(k + 1) * subfr_length;
         let exc_subframe = &exc_q14[subframe_range.clone()];
@@ -216,7 +257,11 @@ pub(super) fn decode_core(
     if params.signal_type == TYPE_VOICED && pitch_lags[params.nb_subfr - 1] > 0 {
         state.lag_prev = pitch_lags[params.nb_subfr - 1];
     }
-    state.out_buf[..params.frame_length].copy_from_slice(&output_pcm[..params.frame_length]);
+    let mv_len = ltp_mem_length.saturating_sub(params.frame_length);
+    if mv_len > 0 {
+        state.out_buf.copy_within(params.frame_length..params.frame_length + mv_len, 0);
+    }
+    state.out_buf[mv_len..mv_len + params.frame_length].copy_from_slice(&output_pcm[..params.frame_length]);
     trace
 }
 
@@ -279,4 +324,51 @@ fn rshift_round(value: i32, shift: usize) -> i32 {
 /// Returns: scaled signed quotient.
 fn div32_var_q(a32: i32, b32: i32, q_res: usize) -> i32 {
     (((a32 as i64) << q_res) / b32 as i64) as i32
+}
+
+/// Approximate `(1 << q_res) / value`.
+///
+/// Params: signed non-zero `value` and target result Q-domain `q_res`.
+/// Returns: reciprocal approximation in fixed-point.
+fn inverse32_var_q(value: i32, q_res: usize) -> i32 {
+    (((1i128 << q_res) + (value as i128 / 2)) / value as i128) as i32
+}
+
+/// Port of `silk_LPC_analysis_filter` used for voiced re-whitening.
+///
+/// Params: mutable `output`, past decoded `input`, LPC `a_q12`, signal `len`, and LPC `order`.
+/// Returns: nothing; `output[..len]` receives Q0 re-whitened samples.
+fn lpc_analysis_filter(output: &mut [i16], input: &[i16], a_q12: &[i16], len: usize, order: usize) {
+    debug_assert!(order <= len);
+    output[..order].fill(0);
+    for ix in order..len {
+        let mut out32_q12 = smulbb(input[ix - 1] as i32, a_q12[0] as i32);
+        out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 2] as i32, a_q12[1] as i32));
+        out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 3] as i32, a_q12[2] as i32));
+        out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 4] as i32, a_q12[3] as i32));
+        out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 5] as i32, a_q12[4] as i32));
+        out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 6] as i32, a_q12[5] as i32));
+        for j in (6..order).step_by(2) {
+            out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 1 - j] as i32, a_q12[j] as i32));
+            out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 2 - j] as i32, a_q12[j + 1] as i32));
+        }
+        let out32_q12 = ((input[ix] as i32) << 12).wrapping_sub(out32_q12);
+        output[ix] = sat16(rshift_round(out32_q12, 12));
+    }
+}
+
+/// Multiply signed low 16-bit halves.
+///
+/// Params: signed `a32` and `b32`.
+/// Returns: signed 32-bit product.
+fn smulbb(a32: i32, b32: i32) -> i32 {
+    (a32 as i16 as i32) * (b32 as i16 as i32)
+}
+
+/// Multiply by the signed low 16-bit half of `b32` and keep high word.
+///
+/// Params: signed `a32` and signed `b32`.
+/// Returns: high-word signed product.
+fn smulwb(a32: i32, b32: i32) -> i32 {
+    ((a32 as i64 * (b32 as i16 as i64)) >> 16) as i32
 }
