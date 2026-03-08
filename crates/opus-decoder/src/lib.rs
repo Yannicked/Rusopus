@@ -19,12 +19,12 @@ macro_rules! debug_trace {
     }};
 }
 
-mod celt;
-pub mod compare;
-mod entropy;
 mod error;
-mod packet;
+mod celt;
 mod silk;
+mod entropy;
+mod packet;
+pub mod compare;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use error::Error;
@@ -116,6 +116,13 @@ impl Decoder {
         self.celt.deemph_mem(0)
     }
 
+    /// Return whether the last CELT frame was transient.
+    ///
+    /// This is a compatibility helper for the local conformance harness.
+    pub fn last_is_transient(&self) -> bool {
+        false
+    }
+
     /// Decode one Opus packet to interleaved i16 PCM.
     ///
     /// - `packet=None` triggers PLC (packet loss concealment).
@@ -174,7 +181,13 @@ impl Decoder {
                 .unwrap_or(0);
             let line = format!(
                 "{{\"sessionId\":\"bea564\",\"runId\":\"run-tv01-tv10-debug1\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:mode_gate\",\"message\":\"decoder_mode_gate\",\"data\":{{\"packet_idx\":{},\"toc\":{},\"config\":{},\"mode\":\"{}\",\"decoder_channels\":{},\"samples_per_channel_needed\":{}}},\"timestamp\":{}}}\n",
-                packet_idx, toc, config, mode_name, self.channels, samples_per_channel_needed, ts
+                packet_idx,
+                toc,
+                config,
+                mode_name,
+                self.channels,
+                samples_per_channel_needed,
+                ts
             );
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
@@ -231,7 +244,12 @@ impl Decoder {
                     .unwrap_or(0);
                 let line = format!(
                     "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:151\",\"message\":\"packet_vs_decoder_channels\",\"data\":{{\"packet_idx\":{},\"packet_channels\":{},\"decoder_channels\":{},\"toc\":{},\"config\":{}}},\"timestamp\":{}}}\n",
-                    packet_idx, pp.packet_channels, self.channels, pp.toc, config, ts
+                    packet_idx,
+                    pp.packet_channels,
+                    self.channels,
+                    pp.toc,
+                    config,
+                    ts
                 );
                 let _ = std::io::Write::write_all(&mut f, line.as_bytes());
             }

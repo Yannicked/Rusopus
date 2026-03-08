@@ -1,3 +1,5 @@
+#![allow(unused_variables, unused_assignments)]
+
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -82,6 +84,16 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
     let mut packet_end_samples = Vec::<usize>::new();
     let mut final_range_mismatches: Vec<(usize, u32, u32)> = Vec::new();
     let dump_got_pcm = std::env::var("OPUS_DUMP_GOT_PCM").ok().as_deref() == Some("1");
+    let trace_packet_idx = std::env::var("OPUS_TRACE_PACKET_IDX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+    let trace_pkt0_pcm8 = std::env::var("OPUS_TRACE_PKT0_PCM8").ok().as_deref() == Some("1");
+    let trace_pcm_packet_idx = std::env::var("OPUS_TRACE_PCM_PACKET_IDX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+    let trace_first10 = std::env::var("OPUS_TRACE_FIRST10").ok().as_deref() == Some("1");
+    let trace_match_all = std::env::var("OPUS_TRACE_MATCH_ALL").ok().as_deref() == Some("1");
+    let trace_pcm_1_10 = std::env::var("OPUS_TRACE_PCM_1_10").ok().as_deref() == Some("1");
     let trace_packet_max_delta =
         std::env::var("OPUS_TRACE_PACKET_MAX_DELTA").ok().as_deref() == Some("1");
 
@@ -93,9 +105,168 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 got_pcm.extend_from_slice(&out[..written]);
                 let pkt_end = got_pcm.len();
                 packet_end_samples.push(pkt_end);
+                    let expected_debug_len = expected_pcm.len() / (v.channels as usize);
+                if pkt_start < expected_debug_len {
+                    let compare_end = pkt_end.min(expected_debug_len);
+                    let mut max_delta = 0i32;
+                    let mut first_diff_idx: isize = -1;
+                    let mut first_diff_delta = 0i32;
+                    let mut first_expected = 0i16;
+                    let mut first_got = 0i16;
+                    let mut max_diff_idx: isize = -1;
+                    let mut max_diff_delta = 0i32;
+                    let mut max_expected = 0i16;
+                    let mut max_got = 0i16;
+                    for i in pkt_start..compare_end {
+                        let expected_i16 = expected_pcm[i];
+                        let delta = got_pcm[i] as i32 - expected_i16 as i32;
+                        let abs_delta = delta.abs();
+                        if abs_delta > max_delta {
+                            max_delta = abs_delta;
+                            max_diff_idx = i as isize;
+                            max_diff_delta = delta;
+                            max_expected = expected_i16;
+                            max_got = got_pcm[i];
+                        }
+                        if first_diff_idx == -1 && delta != 0 {
+                            first_diff_idx = i as isize;
+                            first_diff_delta = delta;
+                            first_expected = expected_i16;
+                            first_got = got_pcm[i];
+                        }
+                    }
+                    if max_delta > 50 {
+                        eprintln!(
+                            "DELTA pkt {} max_delta={} frame_size={} sample_range={}..{}",
+                            packet_idx, max_delta, written, pkt_start, pkt_end
+                        );
+                    }
+                    if should_trace_debug_packet(packet_idx) || max_delta > 500 {
+                        let mut got_start8_csv = String::new();
+                        let mut exp_start8_csv = String::new();
+                        for i in pkt_start..(pkt_start + 8).min(compare_end) {
+                            if !got_start8_csv.is_empty() {
+                                got_start8_csv.push(';');
+                                exp_start8_csv.push(';');
+                            }
+                            got_start8_csv.push_str(&got_pcm[i].to_string());
+                            exp_start8_csv.push_str(&expected_pcm[i].to_string());
+                        }
+                        let data = format!(
+                            "{{\"packet_idx\":{},\"frame_size\":{},\"sample_start\":{},\"sample_end\":{},\"max_delta\":{},\"max_diff_idx\":{},\"max_diff_delta\":{},\"max_expected\":{},\"max_got\":{},\"first_diff_idx\":{},\"first_diff_delta\":{},\"first_expected\":{},\"first_got\":{},\"got_start8_csv\":\"{}\",\"exp_start8_csv\":\"{}\"}}",
+                            packet_idx,
+                            written,
+                            pkt_start,
+                            pkt_end,
+                            max_delta,
+                            max_diff_idx,
+                            max_diff_delta,
+                            max_expected,
+                            max_got,
+                            first_diff_idx,
+                            first_diff_delta,
+                            first_expected,
+                            first_got,
+                            got_start8_csv,
+                            exp_start8_csv
+                        );
+                        // #region agent log
+                        append_debug_log(
+                            "run-onset-map-v1",
+                            "H3",
+                            "crates/opus-decoder/tests/conformance_rfc.rs:run_vector",
+                            "packet_delta",
+                            &data,
+                        );
+                        // #endregion
+                    }
+                }
+                if trace_pkt0_pcm8 && packet_idx == 0 && written >= 8 {
+                    eprintln!(
+                        "[RUST] pkt0 pcm[0..8]: {} {} {} {} {} {} {} {}",
+                        out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]
+                    );
+                }
+                if let Some(target_pcm_idx) = trace_pcm_packet_idx
+                    && packet_idx == target_pcm_idx
+                    && written >= 8
+                {
+                    eprintln!(
+                        "[RUST] pkt{} pcm[0..8]: {} {} {} {} {} {} {} {}",
+                        target_pcm_idx, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]
+                    );
+                    eprintln!(
+                        "[RUST] pkt{} samples_per_channel={}",
+                        target_pcm_idx, samples_per_channel
+                    );
+                }
+                if packet_idx == 1 && written >= 8 {
+                    eprintln!(
+                        "rust pcm[0..8]: {} {} {} {} {} {} {} {}",
+                        out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]
+                    );
+                    if expected_pcm.len() >= 968 {
+                        eprintln!(
+                            "ref  pcm[0..8]: {} {} {} {} {} {} {} {}",
+                            expected_pcm[960],
+                            expected_pcm[961],
+                            expected_pcm[962],
+                            expected_pcm[963],
+                            expected_pcm[964],
+                            expected_pcm[965],
+                            expected_pcm[966],
+                            expected_pcm[967]
+                        );
+                    }
+                }
+                if packet_idx < 5 {
+                    eprintln!("pkt{} deemph_mem={:.4}", packet_idx, dec.deemph_mem());
+                }
                 let got = dec.final_range();
+                if packet_idx < 5 {
+                    eprintln!(
+                        "pkt{} final_range expected={:08x} got={:08x}",
+                        packet_idx, p.expected_final_range, got
+                    );
+                }
+                if trace_first10 && packet_idx < 10 {
+                    eprintln!(
+                        "[RUST] packet {}: final_range match={}",
+                        packet_idx,
+                        got == p.expected_final_range
+                    );
+                }
+                if trace_match_all {
+                    eprintln!(
+                        "pkt {} match={} splits={}",
+                        packet_idx,
+                        got == p.expected_final_range,
+                        dec.last_split_count()
+                    );
+                }
                 if got != p.expected_final_range {
                     final_range_mismatches.push((packet_idx, p.expected_final_range, got));
+                }
+                if trace_pcm_1_10 && (1..=10).contains(&packet_idx) && written >= 4 {
+                    eprintln!(
+                        "[RUST] pkt{} transient={} pcm[0..4]: {} {} {} {}",
+                        packet_idx,
+                        dec.last_is_transient(),
+                        out[0],
+                        out[1],
+                        out[2],
+                        out[3]
+                    );
+                }
+                if let Some(target_idx) = trace_packet_idx
+                    && packet_idx == target_idx
+                {
+                    eprintln!(
+                        "[RUST] packet{} final_range expected=0x{:08x} got=0x{:08x}",
+                        target_idx,
+                        p.expected_final_range, got
+                    );
+                    return Ok(());
                 }
             }
             Err(Error::NotImplemented) => {
@@ -106,7 +277,16 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
     }
 
     if !final_range_mismatches.is_empty() {
-        for (packet_idx, expected, got) in final_range_mismatches.iter().take(8) {}
+        eprintln!(
+            "warning: final_range mismatches for {}: {} packets (soft check for now)",
+            v.name,
+            final_range_mismatches.len()
+        );
+        for (packet_idx, expected, got) in final_range_mismatches.iter().take(8) {
+            eprintln!(
+                "  packet #{packet_idx}: expected 0x{expected:08x}, got 0x{got:08x}"
+            );
+        }
     }
 
     if dump_got_pcm {
@@ -149,6 +329,34 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                     }
                 }
             }
+            eprintln!(
+                "[RUST] first_pcm_diff sample={} packet={} expected={} got={}",
+                sample_idx, packet_idx, expected_pcm[sample_idx], got_pcm[sample_idx]
+            );
+            // #region agent log
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
+            {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let line = format!(
+                    "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H18\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:223\",\"message\":\"first_pcm_diff\",\"data\":{{\"sample_idx\":{},\"packet_idx\":{},\"expected\":{},\"got\":{},\"expected_len\":{},\"got_len\":{},\"first_diffs_csv\":\"{}\"}},\"timestamp\":{}}}\n",
+                    sample_idx,
+                    packet_idx,
+                    expected_pcm[sample_idx],
+                    got_pcm[sample_idx],
+                    expected_pcm.len(),
+                    got_pcm.len(),
+                    diff_csv,
+                    ts
+                );
+                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+            }
+            // #endregion
         }
         let mut top = [(0i32, 0usize); 5];
         for i in 0..min_len {
@@ -177,6 +385,25 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 expected_pcm[i], got_pcm[i], d
             ));
         }
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H28\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:320\",\"message\":\"largest_pcm_deltas\",\"data\":{{\"top_deltas_csv\":\"{}\",\"min_len\":{}}},\"timestamp\":{}}}\n",
+                top_csv,
+                min_len,
+                ts
+            );
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        // #endregion
         if trace_packet_max_delta {
             let mut range_start = 0usize;
             for (packet_idx, &packet_end) in packet_end_samples.iter().enumerate() {
@@ -199,10 +426,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 }
                 let rms = (sum_sq / (range_end - range_start) as f64).sqrt();
                 if max_delta > 50 {
-                    eprintln!(
-                        "[RUST] pkt{} max_delta={} rms={:.1}",
-                        packet_idx, max_delta, rms
-                    );
+                    eprintln!("[RUST] pkt{} max_delta={} rms={:.1}", packet_idx, max_delta, rms);
                 }
                 range_start = range_end;
             }
@@ -229,6 +453,30 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                         }
                     }
                 }
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
+                {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let line = format!(
+                        "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H27\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:271\",\"message\":\"first_pcm_diff_alt\",\"data\":{{\"sample_idx\":{},\"packet_idx\":{},\"alt\":{},\"got\":{},\"alt_len\":{},\"got_len\":{},\"first_diffs_csv\":\"{}\"}},\"timestamp\":{}}}\n",
+                        sample_idx,
+                        packet_idx,
+                        alt_pcm[sample_idx],
+                        got_pcm[sample_idx],
+                        alt_pcm.len(),
+                        got_pcm.len(),
+                        diff_csv,
+                        ts
+                    );
+                    let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+                }
+                // #endregion
             }
         }
     }
@@ -243,24 +491,23 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         return Ok(());
     }
     if let Some(alt_pcm) = &alt_pcm {
-        let q1 = opus_decoder::compare::compare_quality(
-            alt_pcm,
-            &got_pcm,
-            v.channels as usize,
-            v.channels as usize,
-            v.fs_hz,
-        )?;
-        if q1.passes_vectors() {
-            return Ok(());
+        if alt_pcm.len() == expected_pcm.len() {
+            let q1 = opus_decoder::compare::compare_quality(
+                alt_pcm,
+                &got_pcm,
+                v.channels as usize,
+                v.channels as usize,
+                v.fs_hz,
+            )?;
+            if q1.passes_vectors() {
+                return Ok(());
+            }
+            return Err(format!(
+                "PCM mismatch vs both references (quality {:.1}% err {:.6} ; alt {:.1}% err {:.6})",
+                q0.quality_percent, q0.internal_weighted_error, q1.quality_percent, q1.internal_weighted_error
+            )
+            .into());
         }
-        return Err(format!(
-            "PCM mismatch vs both references (quality {:.1}% err {:.6} ; alt {:.1}% err {:.6})",
-            q0.quality_percent,
-            q0.internal_weighted_error,
-            q1.quality_percent,
-            q1.internal_weighted_error
-        )
-        .into());
     }
 
     Err(format!(
@@ -268,6 +515,45 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         q0.quality_percent, q0.internal_weighted_error
     )
     .into())
+}
+
+/// Decide whether a packet should emit extra debug logging.
+///
+/// Params: `packet_idx` packet number in the vector stream.
+/// Returns: true when explicit packet tracing is requested.
+fn should_trace_debug_packet(packet_idx: usize) -> bool {
+    std::env::var("OPUS_TRACE_PACKET_IDX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        == Some(packet_idx)
+}
+
+/// Append one JSON debug line to the local trace log.
+///
+/// Params: `run_id`, `hypothesis_id`, `location`, `message`, and JSON `data`.
+/// Returns: nothing; errors are ignored because this is debug-only tracing.
+fn append_debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: &str,
+) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "{{\"sessionId\":\"4200c5\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+            run_id, hypothesis_id, location, message, data, ts
+        );
+        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    }
 }
 
 fn alt_dec_path(dec_path: &Path) -> Option<PathBuf> {
