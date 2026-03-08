@@ -51,6 +51,7 @@ pub(crate) struct SilkDecoder {
     lbrr_state: [lbrr::ChannelState; 2],
     core_state: [decode_core::SilkChannelState; 2],
     resampler_state: [Option<resampler::SilkResampler>; 2],
+    resampler_history: [[i16; 2]; 2],
     prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
     pred_coef_q12:
         [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
@@ -74,6 +75,7 @@ impl SilkDecoder {
                 decode_core::SilkChannelState::default(),
             ],
             resampler_state: [None, None],
+            resampler_history: [[0; 2]; 2],
             prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
             pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
             first_frame_after_reset: [true; 2],
@@ -93,6 +95,7 @@ impl SilkDecoder {
             decode_core::SilkChannelState::default(),
         ];
         self.resampler_state = [None, None];
+        self.resampler_history = [[0; 2]; 2];
         self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
         self.pred_coef_q12 = [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
         self.first_frame_after_reset = [true; 2];
@@ -156,6 +159,7 @@ impl SilkDecoder {
                 if needs_reset {
                     self.resampler_state[ch] =
                         Some(resampler::SilkResampler::new(internal_fs_hz, self.fs_hz)?);
+                    self.resampler_history[ch] = [0; 2];
                 }
             }
         }
@@ -198,19 +202,29 @@ impl SilkDecoder {
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "after_main_decode");
         }
-
         out[..needed].fill(0);
         let internal_samples_per_channel = internal_frames * frame_length;
         if self.fs_hz == 48_000 {
             for ch in 0..packet_channels as usize {
                 if let Some(resampler) = self.resampler_state[ch].as_mut() {
-                    let expected = resampler.output_len(internal_samples_per_channel);
-                    debug_assert_eq!(expected, samples_per_channel);
-                    let written = resampler.process(
-                        &internal_pcm[ch][..internal_samples_per_channel],
-                        &mut resampled_pcm[ch][..samples_per_channel],
-                    );
-                    debug_assert_eq!(written, samples_per_channel);
+                    let mut written_total = 0usize;
+                    for iframe_idx in 0..internal_frames {
+                        let pcm_range = iframe_idx * frame_length..(iframe_idx + 1) * frame_length;
+                        let frame_pcm = &internal_pcm[ch][pcm_range];
+                        let mut resamp_input = vec![0i16; frame_length + 2];
+                        resamp_input[..2].copy_from_slice(&self.resampler_history[ch]);
+                        resamp_input[2..2 + frame_length].copy_from_slice(frame_pcm);
+                        let expected = resampler.output_len(frame_length);
+                        let written = resampler.process(
+                            &resamp_input[1..1 + frame_length],
+                            &mut resampled_pcm[ch][written_total..written_total + expected],
+                        );
+                        debug_assert_eq!(written, expected);
+                        self.resampler_history[ch][0] = resamp_input[frame_length];
+                        self.resampler_history[ch][1] = resamp_input[frame_length + 1];
+                        written_total += written;
+                    }
+                    debug_assert_eq!(written_total, samples_per_channel);
                 }
             }
         }
