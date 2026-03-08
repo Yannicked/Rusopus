@@ -1,7 +1,7 @@
 //! SILK LBRR payload bit-consumption helpers (Phase 3a).
 
-use crate::Error;
 use crate::entropy::EcDec;
+use crate::Error;
 
 use super::entropy_tables;
 use super::tables;
@@ -45,6 +45,20 @@ pub(super) struct DecodedSideInfo {
     pub quant_offset_type: i32,
     /// Decoded NLSF quantization path for Phase 3b.
     pub nlsf: DecodedNlsfIndices,
+    /// Decoded gain indices for all subframes.
+    pub gain_indices: [i8; MAX_NB_SUBFR],
+    /// Absolute pitch lag index for voiced frames.
+    pub lag_index: i16,
+    /// Pitch contour index for voiced frames.
+    pub contour_index: i8,
+    /// LTP periodicity index.
+    pub per_index: i8,
+    /// LTP codebook index per subframe.
+    pub ltp_indices: [i8; MAX_NB_SUBFR],
+    /// LTP scaling index.
+    pub ltp_scale_index: i8,
+    /// Excitation randomization seed.
+    pub seed: i8,
 }
 
 /// Stored SILK NLSF indices (stage1 plus stage2 residuals).
@@ -84,15 +98,21 @@ pub(super) fn decode_indices(
     };
     let signal_type = ix >> 1;
     let quant_offset_type = ix & 1;
+    let mut gain_indices = [0i8; MAX_NB_SUBFR];
+    let mut lag_index = 0i16;
+    let mut contour_index = 0i8;
+    let mut per_index = 0i8;
+    let mut ltp_indices = [0i8; MAX_NB_SUBFR];
+    let mut ltp_scale_index = 0i8;
 
     if cond_coding == CondCoding::Conditionally {
-        let _ = dec.dec_icdf(&entropy_tables::DELTA_GAIN_ICDF, 8);
+        gain_indices[0] = dec.dec_icdf(&entropy_tables::DELTA_GAIN_ICDF, 8) as i8;
     } else {
-        let _ = dec.dec_icdf(&entropy_tables::GAIN_ICDF[signal_type as usize], 8);
-        let _ = dec.dec_icdf(&entropy_tables::UNIFORM8_ICDF, 8);
+        gain_indices[0] = (dec.dec_icdf(&entropy_tables::GAIN_ICDF[signal_type as usize], 8) << 3) as i8;
+        gain_indices[0] += dec.dec_icdf(&entropy_tables::UNIFORM8_ICDF, 8) as i8;
     }
-    for _ in 1..state.nb_subfr {
-        let _ = dec.dec_icdf(&entropy_tables::DELTA_GAIN_ICDF, 8);
+    for gain in gain_indices.iter_mut().take(state.nb_subfr).skip(1) {
+        *gain = dec.dec_icdf(&entropy_tables::DELTA_GAIN_ICDF, 8) as i8;
     }
 
     let cb = entropy_tables::nlsf_codebook(state.fs_khz);
@@ -136,23 +156,24 @@ pub(super) fn decode_indices(
                 * ((state.fs_khz as i32) >> 1)
                 + dec.dec_icdf(entropy_tables::pitch_lag_low_bits_icdf(state.fs_khz), 8);
         }
+        lag_index = state.ec_prev_lag_index as i16;
 
-        let _ = dec.dec_icdf(
+        contour_index = dec.dec_icdf(
             entropy_tables::pitch_contour_icdf(state.fs_khz, state.nb_subfr),
             8,
-        );
-        let per_index = dec.dec_icdf(&entropy_tables::LTP_PER_INDEX_ICDF, 8) as usize;
-        let ltp_gain_icdf = entropy_tables::ltp_gain_icdf(per_index).ok_or(Error::BadPacket)?;
-        for _ in 0..state.nb_subfr {
-            let _ = dec.dec_icdf(ltp_gain_icdf, 8);
+        ) as i8;
+        per_index = dec.dec_icdf(&entropy_tables::LTP_PER_INDEX_ICDF, 8) as i8;
+        let ltp_gain_icdf = entropy_tables::ltp_gain_icdf(per_index as usize).ok_or(Error::BadPacket)?;
+        for ltp_index in ltp_indices.iter_mut().take(state.nb_subfr) {
+            *ltp_index = dec.dec_icdf(ltp_gain_icdf, 8) as i8;
         }
         if cond_coding == CondCoding::Independently {
-            let _ = dec.dec_icdf(&entropy_tables::LTPSCALE_ICDF, 8);
+            ltp_scale_index = dec.dec_icdf(&entropy_tables::LTPSCALE_ICDF, 8) as i8;
         }
     }
 
     state.ec_prev_signal_type = signal_type;
-    let _ = dec.dec_icdf(&entropy_tables::UNIFORM4_ICDF, 8);
+    let seed = dec.dec_icdf(&entropy_tables::UNIFORM4_ICDF, 8) as i8;
     ix = 0;
     debug_trace!("silk lbrr side info consumed marker={}", ix);
 
@@ -163,6 +184,13 @@ pub(super) fn decode_indices(
             values: nlsf_indices,
             interp_coef_q2,
         },
+        gain_indices,
+        lag_index,
+        contour_index,
+        per_index,
+        ltp_indices,
+        ltp_scale_index,
+        seed,
     })
 }
 
@@ -170,17 +198,14 @@ pub(super) fn decode_indices(
 ///
 /// Params: range decoder `dec`, decoded `signal_type`, `quant_offset_type`,
 /// and internal `frame_length` in samples.
-/// Returns: nothing.
+/// Returns: decoded pulse magnitudes with signs, truncated to `frame_length`.
 pub(super) fn decode_pulses(
     dec: &mut EcDec<'_>,
     signal_type: i32,
     quant_offset_type: i32,
     frame_length: usize,
-) -> Result<(), Error> {
-    let rate_level = dec.dec_icdf(
-        &entropy_tables::RATE_LEVELS_ICDF[(signal_type >> 1) as usize],
-        8,
-    ) as usize;
+) -> Result<Vec<i16>, Error> {
+    let rate_level = dec.dec_icdf(&entropy_tables::RATE_LEVELS_ICDF[(signal_type >> 1) as usize], 8) as usize;
     if rate_level >= entropy_tables::N_RATE_LEVELS {
         return Err(Error::BadPacket);
     }
@@ -231,15 +256,9 @@ pub(super) fn decode_pulses(
         }
     }
 
-    decode_signs(
-        dec,
-        &mut pulses,
-        signal_type,
-        quant_offset_type,
-        &sum_pulses,
-        iter,
-    )?;
-    Ok(())
+    decode_signs(dec, &mut pulses, signal_type, quant_offset_type, &sum_pulses, iter)?;
+    pulses.truncate(frame_length);
+    Ok(pulses)
 }
 
 /// Expand NLSF selector entries to stage-2 row offsets.
@@ -359,10 +378,7 @@ fn decode_signs(
 ///
 /// Params: per-channel per-frame LBRR flag matrix and coded channel count.
 /// Returns: true when at least one LBRR frame is present.
-pub(super) fn any_lbrr(
-    lbrr_flags: &[[bool; MAX_INTERNAL_FRAMES]; 2],
-    packet_channels: usize,
-) -> bool {
+pub(super) fn any_lbrr(lbrr_flags: &[[bool; MAX_INTERNAL_FRAMES]; 2], packet_channels: usize) -> bool {
     lbrr_flags
         .iter()
         .take(packet_channels)

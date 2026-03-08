@@ -3,13 +3,17 @@
 //! This module focuses on bitstream parsing and entropy consumption for SILK
 //! packet headers (VAD/LBRR/stereo signaling), with zeroed synthesis output.
 
-use crate::Error;
 use crate::entropy::EcDec;
+use crate::Error;
 
+mod decode_core;
 mod entropy_tables;
+mod gain;
 mod lbrr;
 mod lpc;
+mod ltp;
 mod nlsf;
+mod pitch;
 mod stereo;
 mod tables;
 
@@ -41,8 +45,10 @@ pub(crate) struct SilkDecoder {
     channels: u8,
     final_range: u32,
     lbrr_state: [lbrr::ChannelState; 2],
+    core_state: [decode_core::SilkChannelState; 2],
     prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
-    pred_coef_q12: [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+    pred_coef_q12:
+        [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
     first_frame_after_reset: [bool; 2],
     prev_decode_only_middle: bool,
 }
@@ -58,6 +64,10 @@ impl SilkDecoder {
             channels,
             final_range: 0,
             lbrr_state: [lbrr::ChannelState::default(), lbrr::ChannelState::default()],
+            core_state: [
+                decode_core::SilkChannelState::default(),
+                decode_core::SilkChannelState::default(),
+            ],
             prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
             pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
             first_frame_after_reset: [true; 2],
@@ -72,9 +82,12 @@ impl SilkDecoder {
     pub fn reset(&mut self) {
         self.final_range = 0;
         self.lbrr_state = [lbrr::ChannelState::default(), lbrr::ChannelState::default()];
+        self.core_state = [
+            decode_core::SilkChannelState::default(),
+            decode_core::SilkChannelState::default(),
+        ];
         self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
-        self.pred_coef_q12 =
-            [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
+        self.pred_coef_q12 = [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2];
         self.first_frame_after_reset = [true; 2];
         self.prev_decode_only_middle = false;
     }
@@ -119,6 +132,7 @@ impl SilkDecoder {
         }
 
         let mut dec = EcDec::new(frame);
+        let mut internal_pcm = [[0i16; MAX_INTERNAL_FRAMES * tables::MAX_FRAME_LENGTH]; 2];
         let trace_pkt0 = packet_idx == 0 && silk_trace_enabled();
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "init");
@@ -156,6 +170,8 @@ impl SilkDecoder {
             &mut self.prev_nlsf_q15,
             &mut self.pred_coef_q12,
             &mut self.first_frame_after_reset,
+            &mut self.core_state,
+            &mut internal_pcm,
             &mut self.prev_decode_only_middle,
             packet_idx,
             trace_pkt0,
@@ -164,8 +180,23 @@ impl SilkDecoder {
             trace_checkpoint(&dec, packet_idx, "after_main_decode");
         }
 
-        // Phase 3a currently parses signaling only; synthesis is intentionally deferred.
         out[..needed].fill(0);
+        let internal_samples_per_channel = internal_frames * frame_length;
+        for n in 0..internal_samples_per_channel.min(samples_per_channel) {
+            let left = internal_pcm[0][n];
+            match self.channels {
+                1 => out[n] = left,
+                2 => {
+                    out[2 * n] = left;
+                    out[2 * n + 1] = if packet_channels == 2 {
+                        internal_pcm[1][n]
+                    } else {
+                        left
+                    };
+                }
+                _ => unreachable!(),
+            }
+        }
 
         self.final_range = dec.final_range();
         if trace_pkt0 {
@@ -182,9 +213,7 @@ impl SilkDecoder {
             debug_trace!("silk: consumed LBRR side payload");
         }
 
-        Ok(SilkFrameDecode {
-            samples_per_channel,
-        })
+        Ok(SilkFrameDecode { samples_per_channel })
     }
 }
 
@@ -207,13 +236,21 @@ fn parse_header(
             parsed.channels[ch].vad_flags[i] = dec.dec_bit_logp(1);
         }
         if trace_pkt0 {
-            trace_checkpoint(dec, packet_idx, &format!("after_vad_flags_ch{}", ch));
+            trace_checkpoint(
+                dec,
+                packet_idx,
+                &format!("after_vad_flags_ch{}", ch),
+            );
         }
 
         let has_lbrr = dec.dec_bit_logp(1);
         parsed.channels[ch].lbrr_flags = unpack_lbrr_flags(dec, has_lbrr, internal_frames)?;
         if trace_pkt0 {
-            trace_checkpoint(dec, packet_idx, &format!("after_lbrr_flag_ch{}", ch));
+            trace_checkpoint(
+                dec,
+                packet_idx,
+                &format!("after_lbrr_flag_ch{}", ch),
+            );
         }
     }
 
@@ -251,11 +288,20 @@ fn consume_lbrr_payload(
             } else {
                 lbrr::CondCoding::Independently
             };
-            let side =
-                lbrr::decode_indices(state, dec, header.channels[ch].vad_flags[i], true, cond)?;
-            lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
+            let side = lbrr::decode_indices(
+                state,
+                dec,
+                header.channels[ch].vad_flags[i],
+                true,
+                cond,
+            )?;
+            let _ = lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
             if trace_pkt0 {
-                trace_checkpoint(dec, packet_idx, &format!("after_lbrr_i{}_ch{}", i, ch));
+                trace_checkpoint(
+                    dec,
+                    packet_idx,
+                    &format!("after_lbrr_i{}_ch{}", i, ch),
+                );
             }
         }
     }
@@ -276,8 +322,11 @@ fn consume_main_payload(
     states: &mut [lbrr::ChannelState; 2],
     frame_length: usize,
     prev_nlsf_q15: &mut [[i16; tables::MAX_LPC_ORDER]; 2],
-    pred_coef_q12: &mut [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
+    pred_coef_q12:
+        &mut [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
     first_frame_after_reset: &mut [bool; 2],
+    core_state: &mut [decode_core::SilkChannelState; 2],
+    internal_pcm: &mut [[i16; MAX_INTERNAL_FRAMES * tables::MAX_FRAME_LENGTH]; 2],
     prev_decode_only_middle: &mut bool,
     packet_idx: usize,
     trace_pkt0: bool,
@@ -346,7 +395,35 @@ fn consume_main_payload(
                     states[ch].fs_khz,
                 );
             }
-            lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
+            let pulses = lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
+            let frame_params = decode_core::SilkFrameParams {
+                signal_type: side.signal_type,
+                quant_offset_type: side.quant_offset_type,
+                gain_indices: side.gain_indices,
+                lag_index: side.lag_index,
+                contour_index: side.contour_index,
+                per_index: side.per_index,
+                ltp_indices: side.ltp_indices,
+                ltp_scale_index: side.ltp_scale_index,
+                seed: side.seed,
+                pulses,
+                conditional: matches!(cond, lbrr::CondCoding::Conditionally),
+                frame_length,
+                nb_subfr: states[ch].nb_subfr,
+                fs_khz: states[ch].fs_khz,
+                lpc_order: tables::nlsf_codebook(states[ch].fs_khz).order,
+            };
+            let pcm_range = i * frame_length..(i + 1) * frame_length;
+            let trace = decode_core::decode_core(
+                &frame_params,
+                &pred_coef_q12[ch][i],
+                &mut internal_pcm[ch][pcm_range],
+                &mut core_state[ch],
+            );
+            if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
+                trace_core(packet_idx, "exc_Q14", &trace.exc_q14_head);
+                trace_core(packet_idx, "sLPC_Q14", &trace.s_lpc_q14_head);
+            }
             if trace_pkt0 {
                 trace_checkpoint(dec, packet_idx, &format!("after_main_i{}_ch{}", i, ch));
             }
@@ -400,11 +477,7 @@ fn update_lpc_from_nlsf(
         &nlsf_indices.values[..order + 1],
         codebook,
     );
-    lpc::nlsf2a(
-        &mut pred_coef_q12[1][..order],
-        &curr_nlsf_q15[..order],
-        order,
-    );
+    lpc::nlsf2a(&mut pred_coef_q12[1][..order], &curr_nlsf_q15[..order], order);
 
     let interp_coef_q2 = if *first_frame_after_reset {
         4
@@ -415,14 +488,9 @@ fn update_lpc_from_nlsf(
         let mut interp_nlsf_q15 = [0i16; tables::MAX_LPC_ORDER];
         for i in 0..order {
             let delta = curr_nlsf_q15[i] as i32 - prev_nlsf_q15[i] as i32;
-            interp_nlsf_q15[i] =
-                (prev_nlsf_q15[i] as i32 + ((interp_coef_q2 as i32 * delta) >> 2)) as i16;
+            interp_nlsf_q15[i] = (prev_nlsf_q15[i] as i32 + ((interp_coef_q2 as i32 * delta) >> 2)) as i16;
         }
-        lpc::nlsf2a(
-            &mut pred_coef_q12[0][..order],
-            &interp_nlsf_q15[..order],
-            order,
-        );
+        lpc::nlsf2a(&mut pred_coef_q12[0][..order], &interp_nlsf_q15[..order], order);
     } else {
         let pred1 = pred_coef_q12[1];
         pred_coef_q12[0][..order].copy_from_slice(&pred1[..order]);
@@ -437,14 +505,7 @@ fn update_lpc_from_nlsf(
 /// Params: `packet_idx`, coded `channel`, internal frame `frame_idx`, `label`,
 /// LPC slice `lpc_q12`, and internal `fs_khz`.
 /// Returns: nothing.
-fn trace_lpc(
-    packet_idx: usize,
-    channel: usize,
-    frame_idx: usize,
-    label: &str,
-    lpc_q12: &[i16],
-    fs_khz: u32,
-) {
+fn trace_lpc(packet_idx: usize, channel: usize, frame_idx: usize, label: &str, lpc_q12: &[i16], fs_khz: u32) {
     let order = tables::nlsf_codebook(fs_khz).order;
     let coeffs = lpc_q12[..order]
         .iter()
@@ -455,6 +516,15 @@ fn trace_lpc(
         "SILK pkt{} LPC ch{} i{} {}_q12: {}",
         packet_idx, channel, frame_idx, label, coeffs
     );
+}
+
+/// Emit packet-0 SILK core trace for excitation or synthesis state.
+///
+/// Params: `packet_idx`, textual `label`, and signed sample `values`.
+/// Returns: nothing.
+fn trace_core(packet_idx: usize, label: &str, values: &[i32; 8]) {
+    let rendered = values.iter().map(i32::to_string).collect::<Vec<_>>().join(" ");
+    eprintln!("SILK pkt{} {}[0..8]: {}", packet_idx, label, rendered);
 }
 
 /// Decode and expand LBRR per-internal-frame flags for one coded channel.
@@ -577,14 +647,8 @@ mod tests {
         let samples = decoder.decode(Some(&packet), &mut out).unwrap();
         assert_eq!(samples, 2880);
         assert_eq!(decoder.final_range(), 0x5037_3c71);
-        assert_eq!(
-            &decoder.silk.pred_coef_q12[0][0][0][..10],
-            &TV02_PKT0_LPC_Q12
-        );
-        assert_eq!(
-            &decoder.silk.pred_coef_q12[0][0][1][..10],
-            &TV02_PKT0_LPC_Q12
-        );
+        assert_eq!(&decoder.silk.pred_coef_q12[0][0][0][..10], &TV02_PKT0_LPC_Q12);
+        assert_eq!(&decoder.silk.pred_coef_q12[0][0][1][..10], &TV02_PKT0_LPC_Q12);
     }
 
     #[test]
