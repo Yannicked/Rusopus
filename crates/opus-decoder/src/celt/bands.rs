@@ -1408,6 +1408,12 @@ pub(crate) fn quant_all_bands_mono(
 ) -> Vec<u8> {
     let trace_target = None;
     let trace_this_packet = trace_target == Some(packet_idx);
+    if packet_idx == 5 || packet_idx == 6 {
+        eprintln!(
+            "R pkt{} bands_entry seed={:#010x} coded_bands={}",
+            packet_idx, *seed, coded_bands
+        );
+    }
     let m = 1usize << lm;
     let mut masks = vec![0u8; mode.nb_ebands];
     let mut lowband_offset = 0usize;
@@ -1808,6 +1814,12 @@ pub(crate) fn quant_all_bands_stereo(
 ) -> Vec<u8> {
     let trace_target = None;
     let trace_this_packet = trace_target == Some(packet_idx);
+    if packet_idx == 5 || packet_idx == 6 {
+        eprintln!(
+            "R pkt{} bands_entry seed={:#010x} coded_bands={}",
+            packet_idx, *seed, coded_bands
+        );
+    }
     let m = 1usize << lm;
     let mut masks = vec![0u8; mode.nb_ebands * 2];
     let mut lowband_offset = 0usize;

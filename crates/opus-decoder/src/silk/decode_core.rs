@@ -5,7 +5,7 @@ use super::ltp;
 use super::pitch;
 use super::tables::{
     LTP_MEM_LENGTH_MS, LTP_ORDER, MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_NB_SUBFR,
-    MAX_SUB_FRAME_LENGTH, QUANTIZATION_OFFSETS_Q10, QUANT_LEVEL_ADJUST_Q10,
+    MAX_SUB_FRAME_LENGTH, QUANT_LEVEL_ADJUST_Q10, QUANTIZATION_OFFSETS_Q10,
 };
 
 const TYPE_VOICED: i32 = 2;
@@ -136,7 +136,9 @@ pub(super) fn decode_core(
     };
 
     let mut trace = CoreTrace::default();
-        if std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1") && (221..=232).contains(&packet_idx) {
+    if std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1")
+        && (221..=232).contains(&packet_idx)
+    {
         eprintln!(
             "R pkt{} iframe{} summary signal_type={} gains={:?} lags={:?}",
             packet_idx,
@@ -146,8 +148,8 @@ pub(super) fn decode_core(
             &pitch_lags[..params.nb_subfr]
         );
     }
-    let offset_q10 =
-        QUANTIZATION_OFFSETS_Q10[(params.signal_type >> 1) as usize][params.quant_offset_type as usize];
+    let offset_q10 = QUANTIZATION_OFFSETS_Q10[(params.signal_type >> 1) as usize]
+        [params.quant_offset_type as usize];
     let mut rand_seed = params.seed as i32;
     let mut exc_q14 = [0i32; MAX_FRAME_LENGTH];
     for i in 0..params.frame_length {
@@ -219,7 +221,8 @@ pub(super) fn decode_core(
 
         if params.signal_type == TYPE_VOICED {
             if k == 0 || (k == 2 && nlsf_interpolation_flag) {
-                let start_idx = ltp_mem_length - pitch_lag as usize - params.lpc_order - (LTP_ORDER / 2);
+                let start_idx =
+                    ltp_mem_length - pitch_lag as usize - params.lpc_order - (LTP_ORDER / 2);
                 if k == 2 {
                     let copy_len = 2 * subfr_length;
                     state.out_buf[ltp_mem_length..ltp_mem_length + copy_len]
@@ -239,7 +242,8 @@ pub(super) fn decode_core(
                 }
                 lpc_analysis_filter(
                     &mut s_ltp[start_idx..ltp_mem_length],
-                    &state.out_buf[start_idx + k * subfr_length..start_idx + k * subfr_length + (ltp_mem_length - start_idx)],
+                    &state.out_buf[start_idx + k * subfr_length
+                        ..start_idx + k * subfr_length + (ltp_mem_length - start_idx)],
                     a_q12,
                     ltp_mem_length - start_idx,
                     params.lpc_order,
@@ -305,17 +309,13 @@ pub(super) fn decode_core(
             if packet_idx == 2 && frame_idx == 0 && k == 0 && i == 30 {
                 eprintln!(
                     "DBG H8 rust sf0 sample30 output lpc_pred_q10={} pres_q14={} new_slpc_q14={}",
-                    lpc_pred_q10,
-                    pres_q14[i],
-                    current_q14
+                    lpc_pred_q10, pres_q14[i], current_q14
                 );
             }
             if packet_idx == 2 && frame_idx == 0 && k == 0 && i == 39 {
                 eprintln!(
                     "DBG H16 rust sf0 sample39 output lpc_pred_q10={} pres_q14={} new_slpc_q14={}",
-                    lpc_pred_q10,
-                    pres_q14[i],
-                    current_q14
+                    lpc_pred_q10, pres_q14[i], current_q14
                 );
             }
             if packet_idx == 2 && frame_idx == 0 && k == 1 && i == 1 {
@@ -323,33 +323,55 @@ pub(super) fn decode_core(
                 let coeffs: [i32; 10] = std::array::from_fn(|j| a_q12[j] as i32);
                 eprintln!(
                     "DBG H12 rust sf1 sample1 coeffs={:?} taps={:?}",
-                    coeffs,
-                    taps
+                    coeffs, taps
                 );
                 eprintln!(
                     "DBG H13 rust sf1 sample1 output lpc_pred_q10={} pres_q14={} new_slpc_q14={}",
-                    lpc_pred_q10,
-                    pres_q14[i],
-                    current_q14
+                    lpc_pred_q10, pres_q14[i], current_q14
                 );
             }
             if matches!(packet_idx, 30 | 223)
                 && frame_idx == 0
                 && k == 0
-                && matches!(i, 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 30 | 31 | 39)
+                && matches!(
+                    i,
+                    0 | 1
+                        | 2
+                        | 3
+                        | 4
+                        | 5
+                        | 6
+                        | 7
+                        | 8
+                        | 9
+                        | 10
+                        | 15
+                        | 16
+                        | 17
+                        | 18
+                        | 19
+                        | 20
+                        | 21
+                        | 22
+                        | 23
+                        | 24
+                        | 30
+                        | 31
+                        | 39
+                )
             {
                 // #region agent log H23
                 eprintln!(
                     "DBG H23 rust pkt{} sf0 sample{} pres_q14={} lpc_pred_q10={} new_slpc_q14={}",
-                    packet_idx,
-                    i,
-                    pres_q14[i],
-                    lpc_pred_q10,
-                    current_q14
+                    packet_idx, i, pres_q14[i], lpc_pred_q10, current_q14
                 );
                 if matches!(i, 16 | 17 | 18 | 19 | 21 | 22 | 30 | 31) {
-                    let taps: [i32; 10] = std::array::from_fn(|j| s_lpc_q14[MAX_LPC_ORDER + i - 1 - j]);
-                    eprintln!("DBG H24 rust pkt{} sf0 sample{} taps={:?}", packet_idx, i, taps);
+                    let taps: [i32; 10] =
+                        std::array::from_fn(|j| s_lpc_q14[MAX_LPC_ORDER + i - 1 - j]);
+                    eprintln!(
+                        "DBG H24 rust pkt{} sf0 sample{} taps={:?}",
+                        packet_idx, i, taps
+                    );
                 }
                 // #endregion
             }
@@ -410,16 +432,21 @@ pub(super) fn decode_core(
         }
     }
 
-    state.s_lpc_q14_buf.copy_from_slice(&s_lpc_q14[..MAX_LPC_ORDER]);
+    state
+        .s_lpc_q14_buf
+        .copy_from_slice(&s_lpc_q14[..MAX_LPC_ORDER]);
     state.prev_signal_type = params.signal_type;
     if params.signal_type == TYPE_VOICED && pitch_lags[params.nb_subfr - 1] > 0 {
         state.lag_prev = pitch_lags[params.nb_subfr - 1];
     }
     let mv_len = ltp_mem_length.saturating_sub(params.frame_length);
     if mv_len > 0 {
-        state.out_buf.copy_within(params.frame_length..params.frame_length + mv_len, 0);
+        state
+            .out_buf
+            .copy_within(params.frame_length..params.frame_length + mv_len, 0);
     }
-    state.out_buf[mv_len..mv_len + params.frame_length].copy_from_slice(&output_pcm[..params.frame_length]);
+    state.out_buf[mv_len..mv_len + params.frame_length]
+        .copy_from_slice(&output_pcm[..params.frame_length]);
     trace
 }
 
@@ -611,7 +638,8 @@ fn lpc_analysis_filter(output: &mut [i16], input: &[i16], a_q12: &[i16], len: us
         out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 6] as i32, a_q12[5] as i32));
         for j in (6..order).step_by(2) {
             out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 1 - j] as i32, a_q12[j] as i32));
-            out32_q12 = out32_q12.wrapping_add(smulbb(input[ix - 2 - j] as i32, a_q12[j + 1] as i32));
+            out32_q12 =
+                out32_q12.wrapping_add(smulbb(input[ix - 2 - j] as i32, a_q12[j + 1] as i32));
         }
         let out32_q12 = ((input[ix] as i32) << 12).wrapping_sub(out32_q12);
         output[ix] = sat16(rshift_round(out32_q12, 12));

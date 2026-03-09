@@ -119,6 +119,15 @@ pub(crate) fn unquant_coarse_energy(
     for i in start..end {
         for c in 0..channels {
             let tell = dec.tell();
+            let tell_frac_before = dec.tell_frac();
+            if start == 17 {
+                // #region agent log H83
+                eprintln!(
+                    "R_COARSE band={} ch={} tell_before={} tell_frac_before={}",
+                    i, c, tell, tell_frac_before
+                );
+                // #endregion
+            }
             let qi = if total_bits - tell >= 15 {
                 let pi = 2 * i.min(20);
                 ec_laplace_decode(
@@ -134,6 +143,18 @@ pub(crate) fn unquant_coarse_energy(
             } else {
                 -1
             };
+            if start == 17 {
+                // #region agent log H84
+                eprintln!(
+                    "R_COARSE band={} ch={} qi={} tell_after={} tell_frac_after={}",
+                    i,
+                    c,
+                    qi,
+                    dec.tell(),
+                    dec.tell_frac()
+                );
+                // #endregion
+            }
             if trace_this_call {
                 debug_trace!(
                     "R pkt{} coarse band={} c={} qi={} tell_frac={}",

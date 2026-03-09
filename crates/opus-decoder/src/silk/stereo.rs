@@ -4,7 +4,6 @@ use crate::entropy::EcDec;
 
 use super::tables;
 
-const STEREO_QUANT_SUB_STEPS: i32 = 5;
 const STEREO_STEP_Q16: i32 = 6_554; // SILK_FIX_CONST(0.5 / 5, 16)
 const STEREO_INTERP_LEN_MS: usize = 8;
 
@@ -40,7 +39,7 @@ pub(super) fn decode_stereo_pred(dec: &mut EcDec<'_>) -> [i32; 2] {
         let low_q13 = tables::STEREO_PRED_QUANT_Q13[side[0] as usize];
         let high_q13 = tables::STEREO_PRED_QUANT_Q13[side[0] as usize + 1];
         let step_q13 = mul_wb(high_q13 - low_q13, STEREO_STEP_Q16);
-        pred_q13[n] = low_q13 + step_q13 * (2 * side[1] + 1) / STEREO_QUANT_SUB_STEPS;
+        pred_q13[n] = low_q13 + step_q13 * (2 * side[1] + 1);
     }
 
     pred_q13[0] -= pred_q13[1];
@@ -63,7 +62,6 @@ fn mul_wb(a: i32, b: i32) -> i32 {
     ((a as i64 * b as i64) >> 16) as i32
 }
 
-
 /// Convert one SILK internal frame from adaptive mid/side to left/right.
 ///
 /// Params: mutable stereo `state`, mutable `mid` and `side` frame buffers,
@@ -75,6 +73,7 @@ pub(super) fn ms_to_lr(
     side: &mut [i16],
     pred_q13: [i32; 2],
     fs_khz: u32,
+    packet_idx: usize,
 ) {
     let frame_length = mid.len();
     debug_assert_eq!(side.len(), frame_length);
@@ -85,8 +84,12 @@ pub(super) fn ms_to_lr(
     x2[..2].copy_from_slice(&state.s_side);
     x1[2..].copy_from_slice(mid);
     x2[2..].copy_from_slice(side);
-    state.s_mid.copy_from_slice(&x1[frame_length..frame_length + 2]);
-    state.s_side.copy_from_slice(&x2[frame_length..frame_length + 2]);
+    state
+        .s_mid
+        .copy_from_slice(&x1[frame_length..frame_length + 2]);
+    state
+        .s_side
+        .copy_from_slice(&x2[frame_length..frame_length + 2]);
 
     let mut pred0_q13 = state.pred_prev_q13[0] as i32;
     let mut pred1_q13 = state.pred_prev_q13[1] as i32;
@@ -99,8 +102,28 @@ pub(super) fn ms_to_lr(
         pred0_q13 += delta0_q13;
         pred1_q13 += delta1_q13;
         let mut sum = ((x1[n] as i32 + x1[n + 2] as i32 + ((x1[n + 1] as i32) << 1)) << 9) as i32;
-        sum = smlawb((x2[n + 1] as i32) << 8, sum, pred0_q13);
-        sum = smlawb(sum, (x1[n + 1] as i32) << 11, pred1_q13);
+        let sum_after_pred0 = smlawb((x2[n + 1] as i32) << 8, sum, pred0_q13);
+        let sum_after_pred1 = smlawb(sum_after_pred0, (x1[n + 1] as i32) << 11, pred1_q13);
+        if packet_idx == 0 && n == 49 {
+            // #region agent log H42
+            eprintln!(
+                "DBG H42 rust pkt0 n49 interp x1n={} x1n1={} x1n2={} x2n1_in={} pred0={} pred1={} delta0={} delta1={} sum_q11={} after_pred0_q8={} after_pred1_q8={} side_out={}",
+                x1[n],
+                x1[n + 1],
+                x1[n + 2],
+                x2[n + 1],
+                pred0_q13,
+                pred1_q13,
+                delta0_q13,
+                delta1_q13,
+                sum,
+                sum_after_pred0,
+                sum_after_pred1,
+                sat16(rshift_round(sum_after_pred1, 8))
+            );
+            // #endregion
+        }
+        sum = sum_after_pred1;
         x2[n + 1] = sat16(rshift_round(sum, 8));
     }
 

@@ -267,6 +267,19 @@ impl Decoder {
         for frame in pp.frames() {
             let frame_samples_48k = pp.samples_per_frame_48k;
             let out_frame = &mut out[written_per_channel * self.channels as usize..];
+            if (1116..=1120).contains(&packet_idx) {
+                // #region agent log H94
+                eprintln!(
+                    "TV12 pkt{} mode={:?} config={} packet_channels={} prev_mode={:?} prev_redundancy={}",
+                    packet_idx,
+                    mode,
+                    config,
+                    pp.packet_channels,
+                    self.prev_mode,
+                    self.prev_redundancy
+                );
+                // #endregion
+            }
             match mode {
                 OpusMode::CeltOnly => {
                     if apply_celt_transition {
@@ -338,6 +351,18 @@ impl Decoder {
                         );
                     }
                     let mut redundancy_rng = 0u32;
+                    if (1116..=1120).contains(&packet_idx) {
+                        // #region agent log H95
+                        eprintln!(
+                            "TV12 pkt{} silk_frame has_redundancy={} redundancy_bytes={} celt_to_silk={} frame_samples={}",
+                            packet_idx,
+                            silk_frame.consumed_redundancy,
+                            silk_frame.redundancy_bytes,
+                            silk_frame.celt_to_silk,
+                            silk_frame.samples_per_channel
+                        );
+                        // #endregion
+                    }
                     if packet_idx == 136 {
                         // #region agent log H90
                         eprintln!(
@@ -384,7 +409,18 @@ impl Decoder {
                         }
                         redundancy_rng = self.celt.final_range();
                         let xor_range = self.silk.final_range() ^ redundancy_rng;
+                        if packet_idx == 1118 {
+                            // #region agent log H96
+                            eprintln!(
+                                "TV12 pkt1118 redundancy_rng={:#010x} xor_range={:#010x} celt_to_silk={}",
+                                redundancy_rng,
+                                xor_range,
+                                silk_frame.celt_to_silk
+                            );
+                            // #endregion
+                        }
                         if !silk_frame.celt_to_silk {
+                            let f5 = (self.fs_hz as usize) / 200;
                             let overlap = (self.fs_hz as usize) / 400;
                             let channels = self.channels as usize;
                             let silk_tail_start =
@@ -397,6 +433,19 @@ impl Decoder {
                                 let tail_probe_end = (silk_tail_start + 8).min(out_frame.len());
                                 let red0_end = 8.min(redundancy_out.len());
                                 let red1_end = (redundancy_start + 8).min(redundancy_out.len());
+                                eprintln!(
+                                    "TV12 pkt136 frame_size={} f5={} f2_5={} channels={}",
+                                    silk_frame.samples_per_channel,
+                                    f5,
+                                    overlap,
+                                    self.channels
+                                );
+                                eprintln!(
+                                    "TV12 pkt136 fade_start={} fade_end={} copy_start={}",
+                                    (silk_frame.samples_per_channel - f5) * channels,
+                                    (silk_frame.samples_per_channel - overlap) * channels,
+                                    (silk_frame.samples_per_channel - overlap) * channels
+                                );
                                 eprintln!(
                                     "TV12 pkt136 pre_fade tail0_8={:?} redund0_8={:?} redund120_8={:?}",
                                     &out_frame[silk_tail_start..tail_probe_end],
@@ -424,6 +473,10 @@ impl Decoder {
                                 );
                                 // #endregion
                             }
+                        } else if packet_idx == 1118 {
+                            // #region agent log H97
+                            eprintln!("TV12 pkt1118 celt_to_silk branch not applied");
+                            // #endregion
                         }
                         if packet_idx == 4 {
                             // #region agent log H50

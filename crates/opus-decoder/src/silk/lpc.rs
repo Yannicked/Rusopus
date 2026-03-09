@@ -14,7 +14,10 @@ const MAX_PREDICTION_POWER_GAIN_INV_Q30: i32 = 107_374;
 /// Returns: nothing; `lpc_q12[..order]` is overwritten.
 pub(super) fn nlsf2a(lpc_q12: &mut [i16], nlsf_q15: &[i16], order: usize) {
     let dbg_pkt223_nlsf = order == 10
-        && nlsf_q15[..order] == [3734, 4720, 6401, 8407, 9236, 14359, 20445, 23284, 26072, 29935];
+        && nlsf_q15[..order]
+            == [
+                3734, 4720, 6401, 8407, 9236, 14359, 20445, 23284, 26072, 29935,
+            ];
     let ordering = match order {
         10 => &[0usize, 9, 6, 3, 4, 5, 8, 1, 2, 7][..],
         16 => &[0usize, 15, 8, 7, 4, 11, 12, 3, 2, 13, 10, 5, 6, 9, 14, 1][..],
@@ -48,14 +51,23 @@ pub(super) fn nlsf2a(lpc_q12: &mut [i16], nlsf_q15: &[i16], order: usize) {
     lpc_fit(lpc_q12, &mut a32_qa1, 12, QA + 1, order);
     if dbg_pkt223_nlsf {
         // #region agent log H30
-        eprintln!("DBG H30 rust pkt223 nlsf2a pre_stabilize lpc_q12={:?} a32_qa1={:?}", &lpc_q12[..order], &a32_qa1[..order]);
+        eprintln!(
+            "DBG H30 rust pkt223 nlsf2a pre_stabilize lpc_q12={:?} a32_qa1={:?}",
+            &lpc_q12[..order],
+            &a32_qa1[..order]
+        );
         // #endregion
     }
     for i in 0..MAX_LPC_STABILIZE_ITERATIONS {
         let inv_gain = lpc_inv_pred_gain(&lpc_q12[..order], order);
         if dbg_pkt223_nlsf {
             // #region agent log H31
-            eprintln!("DBG H31 rust pkt223 nlsf2a iter={} inv_gain={} lpc_q12={:?}", i, inv_gain, &lpc_q12[..order]);
+            eprintln!(
+                "DBG H31 rust pkt223 nlsf2a iter={} inv_gain={} lpc_q12={:?}",
+                i,
+                inv_gain,
+                &lpc_q12[..order]
+            );
             // #endregion
         }
         if inv_gain != 0 {

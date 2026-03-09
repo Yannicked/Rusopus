@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-03-09
+
+- fix(hybrid): restored Hybrid libopus parity by skipping SILK redundancy parsing in Hybrid, restoring the CELT `start == 0` postfilter guard, and correcting SWB Hybrid CELT end band / `effEnd` handling.
+- fix(silk): matched CELT redundancy decode end band to the packet bandwidth in SilkOnly transitions.
+- milestone(opus-decoder): `testvector05` and `testvector06` now pass RFC conformance; current sweep status is `8/12` passing vectors.
+
+## 2026-03-08
+
+- feat(opus-decoder): ported decoder mode transition state handling for SILK/CELT carry-over, including redundancy state tracking and transition fade/reset flow.
+
 ## 2026-03-05
 
 - feat(silk): Phase 3c excitation reconstruction + LPC synthesis complete; subframe gains, pitch/LTP, and Q14 LPC synthesis now match libopus on `testvector02` pkt0, with internal-rate PCM zero-padded to API frame size.

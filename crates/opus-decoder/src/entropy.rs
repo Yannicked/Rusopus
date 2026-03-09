@@ -135,6 +135,14 @@ impl<'a> EcDec<'a> {
         self.rng
     }
 
+    /// Return current entropy decoder `val` state.
+    ///
+    /// Params: none.
+    /// Returns: internal `val` register for debug comparisons.
+    pub fn debug_val(&self) -> u32 {
+        self.val
+    }
+
     #[inline]
     pub fn is_error(&self) -> bool {
         self.error

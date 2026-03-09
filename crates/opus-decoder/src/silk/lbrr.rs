@@ -1,7 +1,7 @@
 //! SILK LBRR payload bit-consumption helpers (Phase 3a).
 
-use crate::entropy::EcDec;
 use crate::Error;
+use crate::entropy::EcDec;
 
 use super::entropy_tables;
 use super::tables;
@@ -108,7 +108,8 @@ pub(super) fn decode_indices(
     if cond_coding == CondCoding::Conditionally {
         gain_indices[0] = dec.dec_icdf(&entropy_tables::DELTA_GAIN_ICDF, 8) as i8;
     } else {
-        gain_indices[0] = (dec.dec_icdf(&entropy_tables::GAIN_ICDF[signal_type as usize], 8) << 3) as i8;
+        gain_indices[0] =
+            (dec.dec_icdf(&entropy_tables::GAIN_ICDF[signal_type as usize], 8) << 3) as i8;
         gain_indices[0] += dec.dec_icdf(&entropy_tables::UNIFORM8_ICDF, 8) as i8;
     }
     for gain in gain_indices.iter_mut().take(state.nb_subfr).skip(1) {
@@ -163,7 +164,8 @@ pub(super) fn decode_indices(
             8,
         ) as i8;
         per_index = dec.dec_icdf(&entropy_tables::LTP_PER_INDEX_ICDF, 8) as i8;
-        let ltp_gain_icdf = entropy_tables::ltp_gain_icdf(per_index as usize).ok_or(Error::BadPacket)?;
+        let ltp_gain_icdf =
+            entropy_tables::ltp_gain_icdf(per_index as usize).ok_or(Error::BadPacket)?;
         for ltp_index in ltp_indices.iter_mut().take(state.nb_subfr) {
             *ltp_index = dec.dec_icdf(ltp_gain_icdf, 8) as i8;
         }
@@ -205,7 +207,10 @@ pub(super) fn decode_pulses(
     quant_offset_type: i32,
     frame_length: usize,
 ) -> Result<Vec<i16>, Error> {
-    let rate_level = dec.dec_icdf(&entropy_tables::RATE_LEVELS_ICDF[(signal_type >> 1) as usize], 8) as usize;
+    let rate_level = dec.dec_icdf(
+        &entropy_tables::RATE_LEVELS_ICDF[(signal_type >> 1) as usize],
+        8,
+    ) as usize;
     if rate_level >= entropy_tables::N_RATE_LEVELS {
         return Err(Error::BadPacket);
     }
@@ -256,7 +261,14 @@ pub(super) fn decode_pulses(
         }
     }
 
-    decode_signs(dec, &mut pulses, signal_type, quant_offset_type, &sum_pulses, iter)?;
+    decode_signs(
+        dec,
+        &mut pulses,
+        signal_type,
+        quant_offset_type,
+        &sum_pulses,
+        iter,
+    )?;
     pulses.truncate(frame_length);
     Ok(pulses)
 }
@@ -378,7 +390,10 @@ fn decode_signs(
 ///
 /// Params: per-channel per-frame LBRR flag matrix and coded channel count.
 /// Returns: true when at least one LBRR frame is present.
-pub(super) fn any_lbrr(lbrr_flags: &[[bool; MAX_INTERNAL_FRAMES]; 2], packet_channels: usize) -> bool {
+pub(super) fn any_lbrr(
+    lbrr_flags: &[[bool; MAX_INTERNAL_FRAMES]; 2],
+    packet_channels: usize,
+) -> bool {
     lbrr_flags
         .iter()
         .take(packet_channels)

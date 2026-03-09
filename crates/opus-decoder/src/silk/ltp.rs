@@ -1,6 +1,8 @@
 //! SILK long-term prediction helpers.
 
-use super::tables::{LTP_ORDER, LTP_SCALES_Q14, LTP_VQ_0_Q7, LTP_VQ_1_Q7, LTP_VQ_2_Q7, MAX_NB_SUBFR};
+use super::tables::{
+    LTP_ORDER, LTP_SCALES_Q14, LTP_VQ_0_Q7, LTP_VQ_1_Q7, LTP_VQ_2_Q7, MAX_NB_SUBFR,
+};
 
 /// Decode LTP codebook entries to Q14 taps for each active subframe.
 ///
@@ -52,10 +54,26 @@ pub(super) fn ltp_filter(
         let pred_base = start + i;
         let mut ltp_pred_q13 = 2i32;
         ltp_pred_q13 = smlawb(ltp_pred_q13, ltp_q15[pred_base], ltp_coefs_q14[0] as i32);
-        ltp_pred_q13 = smlawb(ltp_pred_q13, ltp_q15[pred_base - 1], ltp_coefs_q14[1] as i32);
-        ltp_pred_q13 = smlawb(ltp_pred_q13, ltp_q15[pred_base - 2], ltp_coefs_q14[2] as i32);
-        ltp_pred_q13 = smlawb(ltp_pred_q13, ltp_q15[pred_base - 3], ltp_coefs_q14[3] as i32);
-        ltp_pred_q13 = smlawb(ltp_pred_q13, ltp_q15[pred_base - 4], ltp_coefs_q14[4] as i32);
+        ltp_pred_q13 = smlawb(
+            ltp_pred_q13,
+            ltp_q15[pred_base - 1],
+            ltp_coefs_q14[1] as i32,
+        );
+        ltp_pred_q13 = smlawb(
+            ltp_pred_q13,
+            ltp_q15[pred_base - 2],
+            ltp_coefs_q14[2] as i32,
+        );
+        ltp_pred_q13 = smlawb(
+            ltp_pred_q13,
+            ltp_q15[pred_base - 3],
+            ltp_coefs_q14[3] as i32,
+        );
+        ltp_pred_q13 = smlawb(
+            ltp_pred_q13,
+            ltp_q15[pred_base - 4],
+            ltp_coefs_q14[4] as i32,
+        );
         if matches!(packet_idx, 30 | 223) && frame_idx == 0 && subframe_idx == 0 && i == 4 {
             // #region agent log H25
             eprintln!(

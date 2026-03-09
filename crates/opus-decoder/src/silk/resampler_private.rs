@@ -1,6 +1,8 @@
 //! Private SILK resampler building blocks.
 
-use super::resampler_rom::{RESAMPLER_FRAC_FIR_12, RESAMPLER_ORDER_FIR_12, RESAMPLER_UP2_HQ_0, RESAMPLER_UP2_HQ_1};
+use super::resampler_rom::{
+    RESAMPLER_FRAC_FIR_12, RESAMPLER_ORDER_FIR_12, RESAMPLER_UP2_HQ_0, RESAMPLER_UP2_HQ_1,
+};
 
 /// Upsample by 2 using the SILK high-quality allpass structure.
 ///
@@ -62,10 +64,25 @@ pub(super) fn iir_fir_interpol(
         let buf_index = (index_q16 >> 16) as usize;
         let buf_ptr = &buffer[buf_index..];
 
-        let mut res_q15 = smulbb(buf_ptr[0] as i32, RESAMPLER_FRAC_FIR_12[table_index][0] as i32);
-        res_q15 = smlabb(res_q15, buf_ptr[1] as i32, RESAMPLER_FRAC_FIR_12[table_index][1] as i32);
-        res_q15 = smlabb(res_q15, buf_ptr[2] as i32, RESAMPLER_FRAC_FIR_12[table_index][2] as i32);
-        res_q15 = smlabb(res_q15, buf_ptr[3] as i32, RESAMPLER_FRAC_FIR_12[table_index][3] as i32);
+        let mut res_q15 = smulbb(
+            buf_ptr[0] as i32,
+            RESAMPLER_FRAC_FIR_12[table_index][0] as i32,
+        );
+        res_q15 = smlabb(
+            res_q15,
+            buf_ptr[1] as i32,
+            RESAMPLER_FRAC_FIR_12[table_index][1] as i32,
+        );
+        res_q15 = smlabb(
+            res_q15,
+            buf_ptr[2] as i32,
+            RESAMPLER_FRAC_FIR_12[table_index][2] as i32,
+        );
+        res_q15 = smlabb(
+            res_q15,
+            buf_ptr[3] as i32,
+            RESAMPLER_FRAC_FIR_12[table_index][3] as i32,
+        );
         res_q15 = smlabb(
             res_q15,
             buf_ptr[4] as i32,

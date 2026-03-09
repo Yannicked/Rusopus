@@ -105,7 +105,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 got_pcm.extend_from_slice(&out[..written]);
                 let pkt_end = got_pcm.len();
                 packet_end_samples.push(pkt_end);
-                    let expected_debug_len = expected_pcm.len() / (v.channels as usize);
+                let expected_debug_len = expected_pcm.len() / (v.channels as usize);
                 if pkt_start < expected_debug_len {
                     let compare_end = pkt_end.min(expected_debug_len);
                     let mut max_delta = 0i32;
@@ -193,7 +193,15 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 {
                     eprintln!(
                         "[RUST] pkt{} pcm[0..8]: {} {} {} {} {} {} {} {}",
-                        target_pcm_idx, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]
+                        target_pcm_idx,
+                        out[0],
+                        out[1],
+                        out[2],
+                        out[3],
+                        out[4],
+                        out[5],
+                        out[6],
+                        out[7]
                     );
                     eprintln!(
                         "[RUST] pkt{} samples_per_channel={}",
@@ -263,8 +271,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 {
                     eprintln!(
                         "[RUST] packet{} final_range expected=0x{:08x} got=0x{:08x}",
-                        target_idx,
-                        p.expected_final_range, got
+                        target_idx, p.expected_final_range, got
                     );
                     return Ok(());
                 }
@@ -283,9 +290,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             final_range_mismatches.len()
         );
         for (packet_idx, expected, got) in final_range_mismatches.iter().take(8) {
-            eprintln!(
-                "  packet #{packet_idx}: expected 0x{expected:08x}, got 0x{got:08x}"
-            );
+            eprintln!("  packet #{packet_idx}: expected 0x{expected:08x}, got 0x{got:08x}");
         }
     }
 
@@ -397,9 +402,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 .unwrap_or(0);
             let line = format!(
                 "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H28\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:320\",\"message\":\"largest_pcm_deltas\",\"data\":{{\"top_deltas_csv\":\"{}\",\"min_len\":{}}},\"timestamp\":{}}}\n",
-                top_csv,
-                min_len,
-                ts
+                top_csv, min_len, ts
             );
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
@@ -426,7 +429,10 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                 }
                 let rms = (sum_sq / (range_end - range_start) as f64).sqrt();
                 if max_delta > 50 {
-                    eprintln!("[RUST] pkt{} max_delta={} rms={:.1}", packet_idx, max_delta, rms);
+                    eprintln!(
+                        "[RUST] pkt{} max_delta={} rms={:.1}",
+                        packet_idx, max_delta, rms
+                    );
                 }
                 range_start = range_end;
             }
@@ -504,7 +510,10 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             }
             return Err(format!(
                 "PCM mismatch vs both references (quality {:.1}% err {:.6} ; alt {:.1}% err {:.6})",
-                q0.quality_percent, q0.internal_weighted_error, q1.quality_percent, q1.internal_weighted_error
+                q0.quality_percent,
+                q0.internal_weighted_error,
+                q1.quality_percent,
+                q1.internal_weighted_error
             )
             .into());
         }
@@ -532,13 +541,7 @@ fn should_trace_debug_packet(packet_idx: usize) -> bool {
 ///
 /// Params: `run_id`, `hypothesis_id`, `location`, `message`, and JSON `data`.
 /// Returns: nothing; errors are ignored because this is debug-only tracing.
-fn append_debug_log(
-    run_id: &str,
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: &str,
-) {
+fn append_debug_log(run_id: &str, hypothesis_id: &str, location: &str, message: &str, data: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
