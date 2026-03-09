@@ -1,4 +1,4 @@
-# TrueShark: Opus Decoder (Rust, no-FFI)
+Opus Decoder (Rust, no-FFI)
 
 This workspace is the start of a pure-Rust Opus decoder (decoder-first port of `libopus`, no FFI).
 
