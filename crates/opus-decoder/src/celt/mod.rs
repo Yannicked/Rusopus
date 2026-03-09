@@ -204,6 +204,22 @@ impl CeltDecoder {
         self.start_band = band.min(self.mode.nb_ebands.saturating_sub(1));
     }
 
+    /// Return the currently configured CELT start band.
+    ///
+    /// Params: none.
+    /// Returns: active lower coded band index.
+    pub(crate) fn debug_start_band(&self) -> usize {
+        self.start_band
+    }
+
+    /// Return the CELT end band implied by a TOC config.
+    ///
+    /// Params: packet `config`.
+    /// Returns: upper coded band index for the current mode.
+    pub(crate) fn debug_end_band(&self, config: u8) -> usize {
+        bandwidth_end(config)
+    }
+
     /// Check whether packet should emit targeted debug logs.
     ///
     /// Params: `packet_idx` absolute packet index in current test run.
@@ -700,6 +716,17 @@ impl CeltDecoder {
         }
         let total_bits = (frame.len() * 8) as i32;
         let mut tell = ec.tell();
+        if self.start_band == 17 && packet_idx == 0 {
+            // #region agent log H77
+            eprintln!(
+                "CELT_HYB [entry] tell={} tell_frac={} rng={:#010x} val={:#010x}",
+                ec.tell(),
+                ec.tell_frac(),
+                ec.rng(),
+                ec.debug_val()
+            );
+            // #endregion
+        }
         let _silence_flag = if tell >= total_bits {
             true
         } else if tell == 1 {
@@ -707,6 +734,17 @@ impl CeltDecoder {
         } else {
             false
         };
+        if self.start_band == 17 && packet_idx == 0 {
+            // #region agent log H78
+            eprintln!(
+                "CELT_HYB [after_silence] tell={} tell_frac={} rng={:#010x} val={:#010x}",
+                ec.tell(),
+                ec.tell_frac(),
+                ec.rng(),
+                ec.debug_val()
+            );
+            // #endregion
+        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_silence_flag] tell={}",
@@ -719,7 +757,7 @@ impl CeltDecoder {
         let mut postfilter_qg = -1i32;
         let mut postfilter_tapset = 0i32;
         let mut postfilter_gain = 0.0f32;
-        if tell + 16 <= total_bits && ec.dec_bit_logp(1) {
+        if start == 0 && tell + 16 <= total_bits && ec.dec_bit_logp(1) {
             let octave = ec.dec_uint(6) as i32;
             postfilter_pitch = ((16 << octave) + ec.dec_bits((4 + octave) as u32) as i32) - 1;
             postfilter_qg = ec.dec_bits(3) as i32;
@@ -781,6 +819,17 @@ impl CeltDecoder {
             // #endregion
         }
         tell = ec.tell();
+        if self.start_band == 17 && packet_idx == 0 {
+            // #region agent log H79
+            eprintln!(
+                "CELT_HYB [after_postfilter] tell={} tell_frac={} rng={:#010x} val={:#010x}",
+                ec.tell(),
+                ec.tell_frac(),
+                ec.rng(),
+                ec.debug_val()
+            );
+            // #endregion
+        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_postfilter] tell={}",
@@ -800,6 +849,17 @@ impl CeltDecoder {
         } else {
             false
         };
+        if self.start_band == 17 && packet_idx == 0 {
+            // #region agent log H80
+            eprintln!(
+                "CELT_HYB [after_transient] tell={} tell_frac={} rng={:#010x} val={:#010x}",
+                ec.tell(),
+                ec.tell_frac(),
+                ec.rng(),
+                ec.debug_val()
+            );
+            // #endregion
+        }
         if packet_idx == 905 {
             debug_trace!(
                 "R pkt905 frame_size_48k={} lm={} is_transient={}",
@@ -853,6 +913,17 @@ impl CeltDecoder {
             lm,
             total_bits,
         );
+        if self.start_band == 17 && packet_idx == 0 {
+            // #region agent log H81
+            eprintln!(
+                "CELT_HYB [after_coarse] tell={} tell_frac={} rng={:#010x} val={:#010x}",
+                ec.tell(),
+                ec.tell_frac(),
+                ec.rng(),
+                ec.debug_val()
+            );
+            // #endregion
+        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_coarse_energy] tell={}",
@@ -3237,12 +3308,14 @@ impl CeltDecoder {
     }
 }
 
-/// Map CELT-only Opus config to active end band.
+/// Map CELT or Hybrid Opus config to active end band.
 ///
 /// Params: TOC config value `(toc >> 3) & 0x1f`.
 /// Returns: exclusive end band index.
 fn bandwidth_end(config: u8) -> usize {
     match config {
+        12 | 13 => 20,
+        14 | 15 => 21,
         16..=19 => 13,
         20..=23 => 17,
         24..=27 => 19,

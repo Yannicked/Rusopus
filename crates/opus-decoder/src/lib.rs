@@ -449,21 +449,32 @@ impl Decoder {
                         frame_samples_48k,
                         config,
                         pp.packet_channels,
+                        true,
                         packet_idx,
                         out_frame,
                     ) {
                         Ok(frame) => {
                             if packet_idx <= 1 {
                                 // #region agent log H62
+                                if packet_idx == 0 {
+                                    eprintln!(
+                                        "HYB pkt0 post_silk tell={} rng={:#010x} val={:#010x}",
+                                        ec.tell(),
+                                        ec.rng(),
+                                        ec.debug_val()
+                                    );
+                                }
                                 append_hybrid_debug_log(
                                     "hybrid-after-silk",
                                     "H62",
                                     packet_idx,
                                     &format!(
-                                        "{{\"samples_per_channel\":{},\"tell\":{},\"tell_frac\":{}}}",
+                                        "{{\"samples_per_channel\":{},\"tell\":{},\"tell_frac\":{},\"rng\":{},\"val\":{}}}",
                                         frame.samples_per_channel,
                                         ec.tell(),
-                                        ec.tell_frac()
+                                        ec.tell_frac(),
+                                        ec.rng(),
+                                        ec.debug_val()
                                     ),
                                 );
                                 // #endregion
@@ -496,15 +507,25 @@ impl Decoder {
                     };
                     if packet_idx <= 1 {
                         // #region agent log H63
+                        if packet_idx == 0 {
+                            eprintln!(
+                                "HYB pkt0 post_redund tell={} rng={:#010x} val={:#010x}",
+                                ec.tell(),
+                                ec.rng(),
+                                ec.debug_val()
+                            );
+                        }
                         append_hybrid_debug_log(
                             "hybrid-redundancy-gate",
                             "H63",
                             packet_idx,
                             &format!(
-                                "{{\"redundancy\":{},\"tell\":{},\"tell_frac\":{}}}",
+                                "{{\"redundancy\":{},\"tell\":{},\"tell_frac\":{},\"rng\":{},\"val\":{}}}",
                                 redundancy,
                                 ec.tell(),
-                                ec.tell_frac()
+                                ec.tell_frac(),
+                                ec.rng(),
+                                ec.debug_val()
                             ),
                         );
                         // #endregion
@@ -515,6 +536,13 @@ impl Decoder {
                         ec.shrink_storage(redundancy_bytes);
                     }
                     self.celt.set_start_band(17);
+                    if packet_idx == 0 {
+                        eprintln!(
+                            "HYB pkt0 celt_start={} celt_end={}",
+                            self.celt.debug_start_band(),
+                            self.celt.debug_end_band(config)
+                        );
+                    }
                     let celt_frame = match self.celt.decode_frame_with_ec(
                         frame,
                         &mut ec,
@@ -547,6 +575,9 @@ impl Decoder {
                         }
                     };
                     self.celt.set_start_band(0);
+                    if packet_idx == 0 {
+                        eprintln!("HYB pkt0 celt_rng={:#010x}", self.celt.final_range());
+                    }
                     debug_assert_eq!(
                         silk_frame.samples_per_channel,
                         celt_frame.samples_per_channel
