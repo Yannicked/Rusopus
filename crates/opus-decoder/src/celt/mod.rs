@@ -877,6 +877,17 @@ impl CeltDecoder {
         }
         tell = ec.tell();
         let intra_ener = tell + 3 <= total_bits && ec.dec_bit_logp(3);
+        if self.start_band == 17 && packet_idx == 0 {
+            // #region agent log H82
+            eprintln!(
+                "CELT_HYB [after_intra] tell={} tell_frac={} rng={:#010x} val={:#010x}",
+                ec.tell(),
+                ec.tell_frac(),
+                ec.rng(),
+                ec.debug_val()
+            );
+            // #endregion
+        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_intra_ener] tell={}",
@@ -3314,7 +3325,7 @@ impl CeltDecoder {
 /// Returns: exclusive end band index.
 fn bandwidth_end(config: u8) -> usize {
     match config {
-        12 | 13 => 20,
+        12 | 13 => 19,
         14 | 15 => 21,
         16..=19 => 13,
         20..=23 => 17,
