@@ -338,22 +338,50 @@ impl Decoder {
                         );
                     }
                     let mut redundancy_rng = 0u32;
+                    if packet_idx == 136 {
+                        // #region agent log H90
+                        eprintln!(
+                            "TV12 pkt136 silk_redundancy consumed={} bytes={} celt_to_silk={} samples_per_channel={}",
+                            silk_frame.consumed_redundancy,
+                            silk_frame.redundancy_bytes,
+                            silk_frame.celt_to_silk,
+                            silk_frame.samples_per_channel
+                        );
+                        // #endregion
+                    }
                     if silk_frame.consumed_redundancy {
                         let redundancy_data =
                             &packet_frame[packet_frame.len() - silk_frame.redundancy_bytes..];
                         let redundancy_frame_size_48k = 240usize;
                         let redundancy_samples = (self.fs_hz as usize) / 200;
+                        let redundancy_end_band = silk_redundancy_end_band(config);
                         let mut redundancy_out =
                             vec![0i16; redundancy_samples * self.channels as usize];
                         self.celt.reset();
+                        self.celt.set_start_band(0);
+                        self.celt.set_end_band(redundancy_end_band);
                         let redundancy_frame = self.celt.decode_frame(
                             redundancy_data,
                             redundancy_frame_size_48k,
-                            20,
+                            config,
                             pp.packet_channels,
                             packet_idx,
                             &mut redundancy_out,
                         )?;
+                        self.celt.clear_end_band();
+                        if packet_idx == 136 {
+                            // #region agent log H93
+                            let probe_end = 16.min(redundancy_out.len());
+                            let abs_sum: f32 =
+                                redundancy_out.iter().map(|x| x.abs() as f32).sum();
+                            eprintln!(
+                                "TV12 pkt136 redundancy_end_band={} redundancy_out[0..16]={:?}",
+                                redundancy_end_band,
+                                &redundancy_out[..probe_end]
+                            );
+                            eprintln!("TV12 pkt136 redundancy_out abs_sum={abs_sum:.2}");
+                            // #endregion
+                        }
                         redundancy_rng = self.celt.final_range();
                         let xor_range = self.silk.final_range() ^ redundancy_rng;
                         if !silk_frame.celt_to_silk {
@@ -364,6 +392,19 @@ impl Decoder {
                             let silk_tail_end = silk_frame.samples_per_channel * channels;
                             let redundancy_start = overlap * channels;
                             let redundancy_end = redundancy_start + overlap * channels;
+                            if packet_idx == 136 {
+                                // #region agent log H91
+                                let tail_probe_end = (silk_tail_start + 8).min(out_frame.len());
+                                let red0_end = 8.min(redundancy_out.len());
+                                let red1_end = (redundancy_start + 8).min(redundancy_out.len());
+                                eprintln!(
+                                    "TV12 pkt136 pre_fade tail0_8={:?} redund0_8={:?} redund120_8={:?}",
+                                    &out_frame[silk_tail_start..tail_probe_end],
+                                    &redundancy_out[..red0_end],
+                                    &redundancy_out[redundancy_start..red1_end]
+                                );
+                                // #endregion
+                            }
                             let silk_tail = out_frame[silk_tail_start..silk_tail_end].to_vec();
                             smooth_fade_i16(
                                 &silk_tail,
@@ -374,6 +415,15 @@ impl Decoder {
                                 self.celt.window(),
                                 self.fs_hz,
                             );
+                            if packet_idx == 136 {
+                                // #region agent log H92
+                                let tail_probe_end = (silk_tail_start + 8).min(out_frame.len());
+                                eprintln!(
+                                    "TV12 pkt136 post_fade tail0_8={:?}",
+                                    &out_frame[silk_tail_start..tail_probe_end]
+                                );
+                                // #endregion
+                            }
                         }
                         if packet_idx == 4 {
                             // #region agent log H50
@@ -663,6 +713,20 @@ fn apply_transition_fade_i16(
         window,
         fs_hz,
     );
+}
+
+/// Map SILK packet config to CELT redundancy end band.
+///
+/// Params: Opus TOC `config`.
+/// Returns: exclusive CELT end band matching libopus packet bandwidth.
+fn silk_redundancy_end_band(config: u8) -> usize {
+    match config {
+        0..=3 => 13,
+        4..=11 => 17,
+        12..=13 => 19,
+        14..=15 => 21,
+        _ => 21,
+    }
 }
 
 /// Append one NDJSON debug entry for hybrid decode tracing.

@@ -69,6 +69,7 @@ pub(crate) struct CeltDecoder {
     old_log_energy2: Vec<f32>,
     background_log_energy: Vec<f32>,
     deemph_mem: Vec<f32>,
+    end_band_override: Option<usize>,
     postfilter_period: i32,
     postfilter_period_old: i32,
     postfilter_gain: f32,
@@ -104,6 +105,7 @@ impl CeltDecoder {
             old_log_energy2: vec![LOG_ENERGY_FLOOR_DB; NBANDS_48K_20MS * state_ch],
             background_log_energy: vec![0.0; NBANDS_48K_20MS * state_ch],
             deemph_mem: vec![0.0; state_ch],
+            end_band_override: None,
             postfilter_period: 0,
             postfilter_period_old: 0,
             postfilter_gain: 0.0,
@@ -128,6 +130,7 @@ impl CeltDecoder {
         self.old_log_energy2.fill(LOG_ENERGY_FLOOR_DB);
         self.background_log_energy.fill(0.0);
         self.deemph_mem.fill(0.0);
+        self.end_band_override = None;
         self.postfilter_period = 0;
         self.postfilter_period_old = 0;
         self.postfilter_gain = 0.0;
@@ -204,6 +207,22 @@ impl CeltDecoder {
         self.start_band = band.min(self.mode.nb_ebands.saturating_sub(1));
     }
 
+    /// Override the highest coded band for the next CELT decode.
+    ///
+    /// Params: `band` exclusive upper band index.
+    /// Returns: nothing; the index is clamped to the valid mode range.
+    pub fn set_end_band(&mut self, band: usize) {
+        self.end_band_override = Some(band.clamp(1, self.mode.nb_ebands));
+    }
+
+    /// Clear any explicit CELT end-band override.
+    ///
+    /// Params: none.
+    /// Returns: nothing; future decodes use config-derived band end.
+    pub fn clear_end_band(&mut self) {
+        self.end_band_override = None;
+    }
+
     /// Return the currently configured CELT start band.
     ///
     /// Params: none.
@@ -217,7 +236,7 @@ impl CeltDecoder {
     /// Params: packet `config`.
     /// Returns: upper coded band index for the current mode.
     pub(crate) fn debug_end_band(&self, config: u8) -> usize {
-        bandwidth_end(config)
+        self.end_band_override.unwrap_or_else(|| bandwidth_end(config))
     }
 
     /// Check whether packet should emit targeted debug logs.
@@ -663,7 +682,9 @@ impl CeltDecoder {
             }
         }
         let start = self.start_band.min(self.mode.nb_ebands.saturating_sub(1));
-        let end = bandwidth_end(config);
+        let end = self
+            .end_band_override
+            .unwrap_or_else(|| bandwidth_end(config));
         if packet_idx == 5 || packet_idx == 0 || (56..=60).contains(&packet_idx) {
             eprintln!(
                 "R pkt{} CELT_CONFIG config={} start={} end={} packet_channels={} frame_size_48k={} frame_bytes={}",
