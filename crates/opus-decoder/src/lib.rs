@@ -26,6 +26,7 @@ mod error;
 mod packet;
 mod silk;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::entropy::EcDec;
 
 pub use error::Error;
 
@@ -198,33 +199,20 @@ impl Decoder {
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
         // #endregion
-        if mode == OpusMode::Hybrid {
-            // #region agent log
-            let log_path = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".cursor")
-                .join("debug-bea564.log");
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = format!(
-                    "{{\"sessionId\":\"bea564\",\"runId\":\"run-tv01-tv10-debug1\",\"hypothesisId\":\"H4\",\"location\":\"crates/opus-decoder/src/lib.rs:mode_gate\",\"message\":\"decoder_mode_not_supported\",\"data\":{{\"packet_idx\":{},\"config\":{},\"mode\":\"{}\"}},\"timestamp\":{}}}\n",
-                    packet_idx, config, mode_name, ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            // #endregion
-            return Err(Error::NotImplemented);
-        }
-
         // Parse again to get per-frame slices.
         let pp = packet::parse_packet(packet.unwrap())?;
+        if (600..=604).contains(&packet_idx) {
+            // #region agent log H57
+            eprintln!(
+                "DBG H57 rust pkt{} toc={:#04x} packet_channels={} prev_channels={} mode={:?}",
+                packet_idx,
+                toc,
+                pp.packet_channels,
+                self.silk.prev_packet_channels(),
+                mode
+            );
+            // #endregion
+        }
         if silk_trace && packet_idx <= 2 && mode == OpusMode::SilkOnly {
             eprintln!(
                 "SILK pkt{} toc={:#04x} config={} code={} nb_frames={} samples_per_frame_48k={} samples_needed={}",
@@ -400,6 +388,21 @@ impl Decoder {
                                 &redundancy_out[..8.min(redundancy_out.len())],
                                 &redundancy_out[fade_start..fade_end]
                             );
+                            if !silk_frame.celt_to_silk {
+                                let energy = self.celt.prev_energy_head(5);
+                                eprintln!(
+                                    "R pkt4 post_redund decode_mem_abs={:.4} right={:.4} deemph={:.6} {:.6}",
+                                    self.celt.decode_mem_abs_sum(),
+                                    self.celt.decode_mem_right_abs_sum(),
+                                    self.celt.deemph_mem(0),
+                                    self.celt.deemph_mem(1)
+                                );
+                                eprintln!(
+                                    "R pkt4 post_redund energy[0..{}]={:?}",
+                                    energy.len(),
+                                    energy
+                                );
+                            }
                             // #endregion
                         }
                     }
@@ -416,7 +419,143 @@ impl Decoder {
                         );
                     }
                 }
-                OpusMode::Hybrid => return Err(Error::NotImplemented),
+                OpusMode::Hybrid => {
+                    if packet_idx <= 1 {
+                        // #region agent log H61
+                        eprintln!(
+                            "HYBRID pkt{} frame.len()={} config={} channels={}",
+                            packet_idx,
+                            frame.len(),
+                            config,
+                            pp.packet_channels
+                        );
+                        append_hybrid_debug_log(
+                            "hybrid-entry",
+                            "H61",
+                            packet_idx,
+                            &format!(
+                                "{{\"frame_len\":{},\"config\":{},\"packet_channels\":{},\"tell\":0,\"tell_frac\":0}}",
+                                frame.len(),
+                                config,
+                                pp.packet_channels
+                            ),
+                        );
+                        // #endregion
+                    }
+                    let mut ec = EcDec::new(frame);
+                    let silk_frame = match self.silk.decode_frame_with_ec(
+                        frame,
+                        &mut ec,
+                        frame_samples_48k,
+                        config,
+                        pp.packet_channels,
+                        packet_idx,
+                        out_frame,
+                    ) {
+                        Ok(frame) => {
+                            if packet_idx <= 1 {
+                                // #region agent log H62
+                                append_hybrid_debug_log(
+                                    "hybrid-after-silk",
+                                    "H62",
+                                    packet_idx,
+                                    &format!(
+                                        "{{\"samples_per_channel\":{},\"tell\":{},\"tell_frac\":{}}}",
+                                        frame.samples_per_channel,
+                                        ec.tell(),
+                                        ec.tell_frac()
+                                    ),
+                                );
+                                // #endregion
+                            }
+                            frame
+                        }
+                        Err(err) => {
+                            if packet_idx <= 1 {
+                                // #region agent log H62
+                                append_hybrid_debug_log(
+                                    "hybrid-silk-error",
+                                    "H62",
+                                    packet_idx,
+                                    &format!(
+                                        "{{\"error\":\"{}\",\"tell\":{},\"tell_frac\":{}}}",
+                                        err,
+                                        ec.tell(),
+                                        ec.tell_frac()
+                                    ),
+                                );
+                                // #endregion
+                            }
+                            return Err(err);
+                        }
+                    };
+                    let redundancy = if ec.tell() + 17 + 20 <= (frame.len() as i32) * 8 {
+                        ec.dec_bit_logp(12)
+                    } else {
+                        false
+                    };
+                    if packet_idx <= 1 {
+                        // #region agent log H63
+                        append_hybrid_debug_log(
+                            "hybrid-redundancy-gate",
+                            "H63",
+                            packet_idx,
+                            &format!(
+                                "{{\"redundancy\":{},\"tell\":{},\"tell_frac\":{}}}",
+                                redundancy,
+                                ec.tell(),
+                                ec.tell_frac()
+                            ),
+                        );
+                        // #endregion
+                    }
+                    if redundancy {
+                        let _celt_to_silk = ec.dec_bit_logp(1);
+                        let redundancy_bytes = ec.dec_uint(256) as usize + 2;
+                        ec.shrink_storage(redundancy_bytes);
+                    }
+                    self.celt.set_start_band(17);
+                    let celt_frame = match self.celt.decode_frame_with_ec(
+                        frame,
+                        &mut ec,
+                        frame_samples_48k,
+                        config,
+                        pp.packet_channels,
+                        packet_idx,
+                        out_frame,
+                        true,
+                    ) {
+                        Ok(frame) => frame,
+                        Err(err) => {
+                            if packet_idx <= 1 {
+                                // #region agent log H64
+                                append_hybrid_debug_log(
+                                    "hybrid-celt-error",
+                                    "H64",
+                                    packet_idx,
+                                    &format!(
+                                        "{{\"error\":\"{}\",\"tell\":{},\"tell_frac\":{}}}",
+                                        err,
+                                        ec.tell(),
+                                        ec.tell_frac()
+                                    ),
+                                );
+                                // #endregion
+                            }
+                            self.celt.set_start_band(0);
+                            return Err(err);
+                        }
+                    };
+                    self.celt.set_start_band(0);
+                    debug_assert_eq!(
+                        silk_frame.samples_per_channel,
+                        celt_frame.samples_per_channel
+                    );
+                    self.last_packet_split_count += self.celt.last_split_count();
+                    self.last_final_range = self.celt.final_range();
+                    had_redundancy = redundancy;
+                    written_per_channel += silk_frame.samples_per_channel;
+                }
             }
         }
 
@@ -493,4 +632,28 @@ fn apply_transition_fade_i16(
         window,
         fs_hz,
     );
+}
+
+/// Append one NDJSON debug entry for hybrid decode tracing.
+///
+/// Params: event `message`, `hypothesis_id`, `packet_idx`, and JSON `data`.
+/// Returns: nothing; debug I/O failures are ignored.
+fn append_hybrid_debug_log(message: &str, hypothesis_id: &str, packet_idx: usize, data: &str) {
+    use std::io::Write;
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "{{\"sessionId\":\"9a4e1c\",\"runId\":\"hybrid-entry-trace\",\"hypothesisId\":\"{}\",\"location\":\"crates/opus-decoder/src/lib.rs\",\"message\":\"{}\",\"data\":{{\"packet_idx\":{},\"payload\":{}}},\"timestamp\":{}}}\n",
+            hypothesis_id, message, packet_idx, data, ts
+        );
+        let _ = file.write_all(line.as_bytes());
+    }
 }

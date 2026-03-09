@@ -56,6 +56,7 @@ pub(crate) struct CeltFrameDecode {
 pub(crate) struct CeltDecoder {
     fs_hz: u32,
     channels: u8,
+    start_band: usize,
     mode: &'static modes::CeltMode,
     mdct: mdct::MdctBackward,
     mdct_480: mdct::MdctBackward,
@@ -90,6 +91,7 @@ impl CeltDecoder {
         Self {
             fs_hz,
             channels,
+            start_band: 0,
             mode,
             mdct: mdct::MdctBackward::new(1920, mode.overlap),
             mdct_480: mdct::MdctBackward::new(960, mode.overlap),
@@ -135,6 +137,7 @@ impl CeltDecoder {
         self.final_range = 0;
         self.rng_seed = 0;
         self.last_split_count = 0;
+        self.start_band = 0;
     }
 
     /// Return CELT range coder final state.
@@ -145,6 +148,14 @@ impl CeltDecoder {
         self.final_range
     }
 
+    /// Return the MDCT overlap window used for transition fades.
+    ///
+    /// Params: none.
+    /// Returns: immutable CELT synthesis window coefficients.
+    pub(crate) fn window(&self) -> &[f32] {
+        self.mode.window
+    }
+
     /// Return deemphasis memory for the selected channel.
     ///
     /// Params: `ch` channel index.
@@ -153,12 +164,44 @@ impl CeltDecoder {
         self.deemph_mem[ch]
     }
 
+    /// Return absolute sum of the left decode memory.
+    ///
+    /// Params: none.
+    /// Returns: sum of absolute sample values in the left decode buffer.
+    pub fn decode_mem_abs_sum(&self) -> f32 {
+        self.decode_mem.iter().map(|x| x.abs()).sum()
+    }
+
+    /// Return absolute sum of the right decode memory.
+    ///
+    /// Params: none.
+    /// Returns: sum of absolute sample values in the right decode buffer.
+    pub fn decode_mem_right_abs_sum(&self) -> f32 {
+        self.decode_mem_right.iter().map(|x| x.abs()).sum()
+    }
+
+    /// Return leading CELT band energies for debug comparisons.
+    ///
+    /// Params: `count` is the number of entries to copy.
+    /// Returns: copied prefix of `prev_energy` with at most `count` values.
+    pub fn prev_energy_head(&self, count: usize) -> Vec<f32> {
+        self.prev_energy[..self.prev_energy.len().min(count)].to_vec()
+    }
+
     /// Return split count captured for last decoded frame.
     ///
     /// Params: none.
     /// Returns: recursive split count.
     pub fn last_split_count(&self) -> usize {
         self.last_split_count
+    }
+
+    /// Override the lowest coded band for the next CELT decode.
+    ///
+    /// Params: `band` lower band index to decode from.
+    /// Returns: nothing; the index is clamped to the valid mode range.
+    pub fn set_start_band(&mut self, band: usize) {
+        self.start_band = band.min(self.mode.nb_ebands.saturating_sub(1));
     }
 
     /// Check whether packet should emit targeted debug logs.
@@ -477,6 +520,36 @@ impl CeltDecoder {
         parent_packet_idx: usize,
         out: &mut [i16],
     ) -> Result<CeltFrameDecode, Error> {
+        let mut ec = EcDec::new(frame);
+        self.decode_frame_with_ec(
+            frame,
+            &mut ec,
+            frame_size_48k,
+            config,
+            packet_channels,
+            parent_packet_idx,
+            out,
+            false,
+        )
+    }
+
+    /// Decode a single CELT frame using a shared entropy decoder.
+    ///
+    /// Params: source `frame`, shared mutable `ec`, `frame_size_48k`, TOC `config`,
+    /// coded `packet_channels`, parent `packet_idx`, mutable `out`, and `accum`
+    /// which adds decoded PCM on top of existing samples for hybrid mode.
+    /// Returns: decoded CELT frame metadata.
+    pub(crate) fn decode_frame_with_ec(
+        &mut self,
+        frame: &[u8],
+        mut ec: &mut EcDec<'_>,
+        frame_size_48k: usize,
+        config: u8,
+        packet_channels: u8,
+        parent_packet_idx: usize,
+        out: &mut [i16],
+        accum: bool,
+    ) -> Result<CeltFrameDecode, Error> {
         let frame_call_idx = TRACE_PACKET_CALL_IDX.fetch_add(1, Ordering::SeqCst);
         let packet_idx = parent_packet_idx;
         if self.fs_hz != 48_000 {
@@ -500,6 +573,18 @@ impl CeltDecoder {
         let trace_this_packet = trace_packet_idx == Some(packet_idx);
         let debug_packet = Self::should_trace_debug_packet(packet_idx);
         let coded_channels = packet_channels.clamp(1, 2) as usize;
+        if packet_idx == 5 {
+            let energy = self.prev_energy_head(5);
+            eprintln!(
+                "R pkt5 CELT_ENTRY decode_mem_abs={:.4} right={:.4} deemph={:.6} {:.6} energy[0..{}]={:?}",
+                self.decode_mem_abs_sum(),
+                self.decode_mem_right_abs_sum(),
+                self.deemph_mem[0],
+                self.deemph_mem[1],
+                energy.len(),
+                energy
+            );
+        }
         if debug_packet {
             let overlap_abs: f32 = self.overlap_tail().iter().map(|x| x.abs()).sum();
             let data = format!(
@@ -561,8 +646,20 @@ impl CeltDecoder {
                 self.prev_energy[i] = self.prev_energy[i].max(self.prev_energy[nb + i]);
             }
         }
-        let start = 0usize;
+        let start = self.start_band.min(self.mode.nb_ebands.saturating_sub(1));
         let end = bandwidth_end(config);
+        if packet_idx == 5 || packet_idx == 0 || (56..=60).contains(&packet_idx) {
+            eprintln!(
+                "R pkt{} CELT_CONFIG config={} start={} end={} packet_channels={} frame_size_48k={} frame_bytes={}",
+                packet_idx,
+                config,
+                start,
+                end,
+                packet_channels,
+                frame_size_48k,
+                frame.len()
+            );
+        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} config={} end={} coded_channels={} output_channels={} frame_bytes={} total_bits={}",
@@ -601,7 +698,6 @@ impl CeltDecoder {
             }
             // #endregion
         }
-        let mut ec = EcDec::new(frame);
         let total_bits = (frame.len() * 8) as i32;
         let mut tell = ec.tell();
         let _silence_flag = if tell >= total_bits {
@@ -971,6 +1067,18 @@ impl CeltDecoder {
             lm,
             &mut ec,
         );
+        if packet_idx == 58 {
+            eprintln!(
+                "R pkt58 alloc tell_before_bands={} total_bits_q={} bits={} coded_bands={} intensity={} dual_stereo={} balance={}",
+                ec.tell_frac(),
+                (frame.len() as i32 * 8) << BITRES,
+                bits,
+                alloc.coded_bands,
+                alloc.intensity,
+                alloc.dual_stereo,
+                alloc.balance
+            );
+        }
         if trace_this_packet {
             debug_trace!("R pkt{} [after_alloc] tell={}", packet_idx, ec.tell_frac());
             debug_trace!(
@@ -3049,7 +3157,13 @@ impl CeltDecoder {
                 // #endregion
             }
             for i in 0..frame_size_48k {
-                out[i * self.channels as usize + ch] = Self::float_to_i16(ch_synth[i]);
+                let sample = Self::float_to_i16(ch_synth[i]);
+                let out_idx = i * self.channels as usize + ch;
+                out[out_idx] = if accum {
+                    out[out_idx].saturating_add(sample)
+                } else {
+                    sample
+                };
             }
             if packet_idx == 6 && ch == 0 {
                 let out_len = frame_size_48k * self.channels as usize;
@@ -3089,6 +3203,22 @@ impl CeltDecoder {
             );
         }
         self.rng_seed = ec.rng();
+        if packet_idx == 5 {
+            let sample_end = out.len().min(16);
+            eprintln!(
+                "R pkt5 CELT_OUT pcm[0..{}]={:?}",
+                sample_end,
+                &out[..sample_end]
+            );
+            eprintln!(
+                "R pkt5 CELT_OUT decode_mem_abs={:.4} right={:.4} deemph={:.6} {:.6}",
+                self.decode_mem_abs_sum(),
+                self.decode_mem_right_abs_sum(),
+                self.deemph_mem[0],
+                self.deemph_mem[1]
+            );
+            eprintln!("R pkt5 energy[0..13]={:?}", &self.prev_energy[..13]);
+        }
         let _ = (
             OVERLAP_48K_20MS,
             self.mode.preemph[0],

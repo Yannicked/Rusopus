@@ -140,6 +140,19 @@ impl<'a> EcDec<'a> {
         self.error
     }
 
+    /// Shrink visible decoder storage to hide trailing side data.
+    ///
+    /// Params: `bytes` number of bytes reserved at packet end.
+    /// Returns: nothing; the active storage window is clamped in place.
+    pub fn shrink_storage(&mut self, bytes: usize) {
+        self.storage = self.storage.saturating_sub(bytes);
+        self.end_offs = self.end_offs.min(self.storage);
+        if self.offs > self.storage {
+            self.offs = self.storage;
+            self.error = true;
+        }
+    }
+
     /// Debug accessor: number of raw-bit bytes consumed from packet end.
     ///
     /// Params: none.
