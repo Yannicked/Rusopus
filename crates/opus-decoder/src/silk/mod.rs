@@ -222,8 +222,30 @@ impl SilkDecoder {
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "init");
         }
-        for state in self.lbrr_state.iter_mut().take(packet_channels as usize) {
-            lbrr::configure_channel_state(state, internal_fs_hz / 1000, nb_subfr);
+        for ch in 0..packet_channels as usize {
+            let prev_fs_khz = self.lbrr_state[ch].fs_khz;
+            let new_fs_khz = internal_fs_hz / 1000;
+            if prev_fs_khz != 0 && prev_fs_khz != new_fs_khz {
+                self.core_state[ch] = decode_core::SilkChannelState::default();
+                self.first_frame_after_reset[ch] = true;
+                if (1116..=1120).contains(&packet_idx) {
+                    // #region agent log H112
+                    eprintln!(
+                        "TV12 pkt{} silk_fs_reset ch={} prev_fs={} new_fs={}",
+                        packet_idx, ch, prev_fs_khz, new_fs_khz
+                    );
+                    append_silk_debug_log(
+                        "tv12-silk-fs-reset",
+                        "H112",
+                        &format!(
+                            "{{\"packet_idx\":{},\"channel\":{},\"prev_fs_khz\":{},\"new_fs_khz\":{}}}",
+                            packet_idx, ch, prev_fs_khz, new_fs_khz
+                        ),
+                    );
+                    // #endregion
+                }
+            }
+            lbrr::configure_channel_state(&mut self.lbrr_state[ch], new_fs_khz, nb_subfr);
         }
         if self.fs_hz == 48_000 {
             for ch in 0..packet_channels as usize {
@@ -279,6 +301,30 @@ impl SilkDecoder {
                 return Err(err);
             }
         };
+        if packet_idx == 1118 {
+            let ch = &self.core_state[0];
+            let tail_start = ch.out_buf.len().saturating_sub(8);
+            // #region agent log H110
+            eprintln!(
+                "TV12 pkt1118 silk_entry: out_buf_last8={:?} sLPC_head4={:?} lag_prev={} prev_gain_index={}",
+                &ch.out_buf[tail_start..],
+                &ch.s_lpc_q14_buf[..4],
+                ch.lag_prev,
+                ch.last_gain_index
+            );
+            append_silk_debug_log(
+                "tv12-pkt1118-silk-entry",
+                "H110",
+                &format!(
+                    "{{\"packet_idx\":1118,\"out_buf_tail\":{:?},\"s_lpc_head4\":{:?},\"lag_prev\":{},\"prev_gain_index\":{}}}",
+                    &ch.out_buf[tail_start..],
+                    &ch.s_lpc_q14_buf[..4],
+                    ch.lag_prev,
+                    ch.last_gain_index
+                ),
+            );
+            // #endregion
+        }
         if let Err(err) = consume_lbrr_payload(
             &mut dec,
             &parsed,
@@ -383,6 +429,30 @@ impl SilkDecoder {
         }
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "after_main_decode");
+        }
+        if packet_idx == 1117 {
+            let ch = &self.core_state[0];
+            let tail_start = ch.out_buf.len().saturating_sub(8);
+            // #region agent log H111
+            eprintln!(
+                "TV12 post_pkt1117 out_buf_last8={:?} sLPC_head4={:?} lag_prev={} prev_gain_index={}",
+                &ch.out_buf[tail_start..],
+                &ch.s_lpc_q14_buf[..4],
+                ch.lag_prev,
+                ch.last_gain_index
+            );
+            append_silk_debug_log(
+                "tv12-post-pkt1117-silk-state",
+                "H111",
+                &format!(
+                    "{{\"packet_idx\":1117,\"out_buf_tail\":{:?},\"s_lpc_head4\":{:?},\"lag_prev\":{},\"prev_gain_index\":{}}}",
+                    &ch.out_buf[tail_start..],
+                    &ch.s_lpc_q14_buf[..4],
+                    ch.lag_prev,
+                    ch.last_gain_index
+                ),
+            );
+            // #endregion
         }
         out[..needed].fill(0);
         let internal_samples_per_channel = internal_frames * frame_length;
@@ -1096,6 +1166,43 @@ fn consume_main_payload(
             &signal_types[1][..internal_frames],
             &mid_only_flags[..internal_frames]
         );
+    }
+    if packet_idx == 1118 {
+        let internal_samples_per_channel = internal_frames * frame_length;
+        let head_end = 8.min(internal_samples_per_channel);
+        let tail_start = internal_samples_per_channel.saturating_sub(8);
+        // #region agent log H109
+        eprintln!(
+            "TV12 pkt1118 internal_pcm[0..8]={:?}",
+            &internal_pcm[0][..head_end]
+        );
+        eprintln!(
+            "TV12 pkt1118 internal_pcm_last8={:?}",
+            &internal_pcm[0][tail_start..internal_samples_per_channel]
+        );
+        eprintln!(
+            "TV12 pkt1118 internal_fs={} signal_type={} packet_channels={} internal_frames={} frame_length={}",
+            states[0].fs_khz,
+            signal_types[0][0],
+            packet_channels,
+            internal_frames,
+            frame_length
+        );
+        append_silk_debug_log(
+            "tv12-pkt1118-internal-pcm",
+            "H109A",
+            &format!(
+                "{{\"packet_idx\":1118,\"internal_fs_khz\":{},\"signal_type\":{},\"packet_channels\":{},\"internal_frames\":{},\"frame_length\":{},\"head\":{:?},\"tail\":{:?}}}",
+                states[0].fs_khz,
+                signal_types[0][0],
+                packet_channels,
+                internal_frames,
+                frame_length,
+                &internal_pcm[0][..head_end],
+                &internal_pcm[0][tail_start..internal_samples_per_channel]
+            ),
+        );
+        // #endregion
     }
     Ok(())
 }
