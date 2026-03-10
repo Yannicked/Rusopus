@@ -199,6 +199,7 @@ pub(crate) fn unquant_fine_energy(
     extra_quant: &[i32],
     dec: &mut EcDec<'_>,
     channels: usize,
+    packet_idx: usize,
 ) {
     let target_idx = None;
     let fine_call_idx = TRACE_FINE_CALL_IDX.fetch_add(1, Ordering::SeqCst);
@@ -208,8 +209,39 @@ pub(crate) fn unquant_fine_energy(
             continue;
         }
         let tell_before_band = dec.tell_frac();
+        let guard_ok =
+            dec.tell() + (channels as i32) * extra <= (dec.storage() as i32) * 8;
+        if packet_idx == 38 && start == 0 {
+            // #region agent log H106
+            eprintln!(
+                "R_FINE band={} extra={} guard={} tell_before_band={} nbits_before_band={}",
+                i,
+                extra,
+                guard_ok,
+                dec.tell(),
+                dec.nbits_total()
+            );
+            // #endregion
+        }
         for c in 0..channels {
+            let nbits_before = dec.nbits_total();
+            let tell_before = dec.tell();
             let q2 = dec.dec_bits(extra as u32) as f32;
+            if packet_idx == 38 && start == 0 {
+                // #region agent log H106
+                eprintln!(
+                    "R_FINE band={} c={} extra={} guard={} tell_before={} nbits_before={} tell_after={} nbits_after={}",
+                    i,
+                    c,
+                    extra,
+                    guard_ok,
+                    tell_before,
+                    nbits_before,
+                    dec.tell(),
+                    dec.nbits_total()
+                );
+                // #endregion
+            }
             let offset =
                 (q2 + 0.5) * ((1u32 << (14 - extra as u32)) as f32) * (1.0 / 16384.0) - 0.5;
             old_ebands[i + c * mode.nb_ebands] += offset;

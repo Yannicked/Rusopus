@@ -127,6 +127,24 @@ impl<'a> EcDec<'a> {
         self.rng
     }
 
+    /// Return active entropy storage in bytes.
+    ///
+    /// Params: none.
+    /// Returns: currently visible storage after any shrinking for raw bits.
+    #[inline]
+    pub fn storage(&self) -> usize {
+        self.storage
+    }
+
+    /// Return the whole-bit counter tracked by the entropy decoder.
+    ///
+    /// Params: none.
+    /// Returns: `nbits_total`, excluding partial range-coder bits.
+    #[inline]
+    pub fn nbits_total(&self) -> i32 {
+        self.nbits_total
+    }
+
     /// Return current entropy decoder range state.
     ///
     /// Params: none.
