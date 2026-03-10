@@ -685,6 +685,7 @@ impl CeltDecoder {
         let end = self
             .end_band_override
             .unwrap_or_else(|| bandwidth_end(config));
+        let active_len = ec.storage();
         if packet_idx == 5 || packet_idx == 0 || (56..=60).contains(&packet_idx) {
             eprintln!(
                 "R pkt{} CELT_CONFIG config={} start={} end={} packet_channels={} frame_size_48k={} frame_bytes={}",
@@ -694,7 +695,7 @@ impl CeltDecoder {
                 end,
                 packet_channels,
                 frame_size_48k,
-                frame.len()
+                active_len
             );
         }
         if trace_this_packet {
@@ -705,8 +706,8 @@ impl CeltDecoder {
                 end,
                 coded_channels,
                 self.channels,
-                frame.len(),
-                frame.len() as i32 * 8
+                active_len,
+                active_len as i32 * 8
             );
             debug_trace!("R pkt{} frame_call_idx={}", packet_idx, frame_call_idx);
             if self.channels == 2 {
@@ -735,7 +736,7 @@ impl CeltDecoder {
             }
             // #endregion
         }
-        let total_bits = (frame.len() * 8) as i32;
+        let total_bits = (active_len * 8) as i32;
         // #region agent log H105
         let trace_pkt38_stage = |stage: &str, ec: &EcDec<'_>| {
             if packet_idx == 38 {
@@ -1177,7 +1178,7 @@ impl CeltDecoder {
             // #endregion
         }
         trace_pkt38_stage("trim", &ec);
-        let mut bits = ((frame.len() as i32 * 8) << BITRES) - ec.tell_frac() as i32 - 1;
+        let mut bits = ((active_len as i32 * 8) << BITRES) - ec.tell_frac() as i32 - 1;
         let anti_collapse_rsv = if is_transient && lm >= 2 && bits >= ((lm as i32 + 2) << BITRES) {
             1 << BITRES
         } else {
@@ -1293,7 +1294,7 @@ impl CeltDecoder {
             eprintln!(
                 "R pkt58 alloc tell_before_bands={} total_bits_q={} bits={} coded_bands={} intensity={} dual_stereo={} balance={}",
                 ec.tell_frac(),
-                (frame.len() as i32 * 8) << BITRES,
+                (active_len as i32 * 8) << BITRES,
                 bits,
                 alloc.coded_bands,
                 alloc.intensity,
@@ -1336,7 +1337,7 @@ impl CeltDecoder {
                 "pkt{}: tell_before_bands={} total_bits_q={}",
                 packet_idx,
                 ec.tell_frac(),
-                (frame.len() as i32 * 8) << 3
+                (active_len as i32 * 8) << 3
             );
             // #region agent log
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1352,7 +1353,7 @@ impl CeltDecoder {
                     "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H2\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:368\",\"message\":\"tell_before_fine_with_alloc\",\"data\":{{\"packet_idx\":{},\"tell\":{},\"total_bits_q\":{},\"channels\":{},\"intensity\":{},\"dual_stereo\":{},\"coded_bands\":{}}},\"timestamp\":{}}}\n",
                     packet_idx,
                     ec.tell_frac(),
-                    (frame.len() as i32 * 8) << 3,
+                    (active_len as i32 * 8) << 3,
                     coded_channels,
                     alloc.intensity,
                     alloc.dual_stereo,
@@ -1492,7 +1493,7 @@ impl CeltDecoder {
                 is_transient,
                 spread_decision,
                 &tf_res,
-                (frame.len() as i32 * 8 << BITRES) - anti_collapse_rsv,
+                (active_len as i32 * 8 << BITRES) - anti_collapse_rsv,
                 alloc.balance,
                 alloc.coded_bands,
                 lm,
@@ -1514,7 +1515,7 @@ impl CeltDecoder {
                 is_transient,
                 spread_decision,
                 &tf_res,
-                (frame.len() as i32 * 8 << BITRES) - anti_collapse_rsv,
+                (active_len as i32 * 8 << BITRES) - anti_collapse_rsv,
                 alloc.balance,
                 alloc.coded_bands,
                 lm,
@@ -1834,7 +1835,7 @@ impl CeltDecoder {
             Some(&mut self.prev_energy),
             &alloc.fine_quant,
             &alloc.fine_priority,
-            frame.len() as i32 * 8 - ec.tell(),
+            active_len as i32 * 8 - ec.tell(),
             &mut ec,
             coded_channels,
         );
