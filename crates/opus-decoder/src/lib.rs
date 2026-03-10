@@ -285,7 +285,7 @@ impl Decoder {
         let mut had_redundancy = false;
         let mut last_celt_to_silk = false;
         let mut written_per_channel = 0usize;
-        for frame in pp.frames() {
+        for &frame in pp.frames().iter() {
             let frame_samples_48k = pp.samples_per_frame_48k;
             let out_frame = &mut out[written_per_channel * self.channels as usize..];
             if (1116..=1120).contains(&packet_idx) {
@@ -819,9 +819,11 @@ impl Decoder {
                         );
                         // #endregion
                     }
+                    let mut celt_to_silk = false;
+                    let mut redundancy_bytes = 0usize;
                     if redundancy {
-                        let _celt_to_silk = ec.dec_bit_logp(1);
-                        let redundancy_bytes = ec.dec_uint(256) as usize + 2;
+                        celt_to_silk = ec.dec_bit_logp(1);
+                        redundancy_bytes = ec.dec_uint(256) as usize + 2;
                         ec.shrink_storage(redundancy_bytes);
                     }
                     self.celt.set_start_band(17);
@@ -873,6 +875,47 @@ impl Decoder {
                     );
                     self.last_packet_split_count += self.celt.last_split_count();
                     self.last_final_range = self.celt.final_range();
+                    if redundancy && !celt_to_silk {
+                        let channels = self.channels as usize;
+                        let redundancy_samples = (self.fs_hz as usize) / 200;
+                        let overlap = (self.fs_hz as usize) / 400;
+                        let frame_len = celt_frame.samples_per_channel * channels;
+                        let redundancy_data = &frame[frame.len() - redundancy_bytes..];
+                        let mut redundancy_out = vec![0i16; redundancy_samples * channels];
+                        self.celt.reset();
+                        self.celt.set_start_band(0);
+                        let redundancy_frame = self.celt.decode_frame(
+                            redundancy_data,
+                            240,
+                            config,
+                            pp.packet_channels,
+                            packet_idx,
+                            &mut redundancy_out,
+                        )?;
+                        self.last_packet_split_count += self.celt.last_split_count();
+                        let redundant_rng = self.celt.final_range();
+                        let fade_len = overlap * channels;
+                        let tail_start = frame_len.saturating_sub(fade_len);
+                        let tail_end = tail_start + fade_len;
+                        let redundancy_start = fade_len;
+                        let redundancy_end = redundancy_start + fade_len;
+                        if tail_end <= out_frame.len()
+                            && redundancy_end <= redundancy_out.len()
+                            && redundancy_frame.samples_per_channel == redundancy_samples
+                        {
+                            let celt_tail = out_frame[tail_start..tail_end].to_vec();
+                            smooth_fade_i16(
+                                &celt_tail,
+                                &redundancy_out[redundancy_start..redundancy_end],
+                                &mut out_frame[tail_start..tail_end],
+                                overlap,
+                                channels,
+                                self.celt.window(),
+                                self.fs_hz,
+                            );
+                        }
+                        self.last_final_range ^= redundant_rng;
+                    }
                     had_redundancy = redundancy;
                     written_per_channel += silk_frame.samples_per_channel;
                 }
