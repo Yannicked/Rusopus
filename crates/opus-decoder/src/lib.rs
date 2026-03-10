@@ -826,6 +826,34 @@ impl Decoder {
                         redundancy_bytes = ec.dec_uint(256) as usize + 2;
                         ec.shrink_storage(redundancy_bytes);
                     }
+                    let mut celt_to_silk_audio = Vec::new();
+                    let mut celt_to_silk_samples = 0usize;
+                    let mut redundant_rng = 0u32;
+                    let apply_celt_to_silk_audio = redundancy
+                        && celt_to_silk
+                        && (self.prev_mode != Some(OpusMode::SilkOnly) || self.prev_redundancy);
+                    let reset_main_celt =
+                        self.prev_mode.is_some() && self.prev_mode != Some(mode) && !self.prev_redundancy;
+                    if redundancy && celt_to_silk {
+                        let redundancy_samples = (self.fs_hz as usize) / 200;
+                        let redundancy_data = &frame[frame.len() - redundancy_bytes..];
+                        self.celt.set_start_band(0);
+                        celt_to_silk_audio = vec![0i16; redundancy_samples * channels];
+                        let redundancy_frame = self.celt.decode_frame(
+                            redundancy_data,
+                            240,
+                            config,
+                            pp.packet_channels,
+                            packet_idx,
+                            &mut celt_to_silk_audio,
+                        )?;
+                        self.last_packet_split_count += self.celt.last_split_count();
+                        celt_to_silk_samples = redundancy_frame.samples_per_channel;
+                        redundant_rng = self.celt.final_range();
+                    }
+                    if reset_main_celt {
+                        self.celt.reset();
+                    }
                     self.celt.set_start_band(17);
                     if packet_idx == 0 {
                         eprintln!(
@@ -874,7 +902,8 @@ impl Decoder {
                         celt_frame.samples_per_channel
                     );
                     self.last_packet_split_count += self.celt.last_split_count();
-                    self.last_final_range = self.celt.final_range();
+                    let main_celt_rng = self.celt.final_range();
+                    self.last_final_range = main_celt_rng;
                     if redundancy && !celt_to_silk {
                         let channels = self.channels as usize;
                         let redundancy_samples = (self.fs_hz as usize) / 200;
@@ -916,7 +945,25 @@ impl Decoder {
                         }
                         self.last_final_range ^= redundant_rng;
                     }
-                    had_redundancy = redundancy;
+                    let mut applied_celt_to_silk = false;
+                    if redundancy && celt_to_silk {
+                        if apply_celt_to_silk_audio {
+                            let overlap = (self.fs_hz as usize) / 400;
+                            let frame_len = celt_frame.samples_per_channel * channels;
+                            apply_transition_fade_i16(
+                                &celt_to_silk_audio,
+                                &mut out_frame[..frame_len],
+                                overlap.min(celt_to_silk_samples / 2),
+                                channels,
+                                self.celt.window(),
+                                self.fs_hz,
+                            );
+                            applied_celt_to_silk = true;
+                        }
+                        self.last_final_range ^= redundant_rng;
+                    }
+                    last_celt_to_silk = celt_to_silk;
+                    had_redundancy = redundancy && !celt_to_silk;
                     written_per_channel += silk_frame.samples_per_channel;
                 }
             }
