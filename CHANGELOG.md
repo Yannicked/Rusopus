@@ -2,6 +2,8 @@
 
 ## 2026-03-09
 
+- feat(silk): fixed mono Hybrid resampler carry by sourcing the 48 kHz handoff from `stereo_state.s_mid` instead of the stale mono history buffer; `testvector10` now passes (was `err=4.58`).
+- milestone(rfc8251): all `12/12` RFC 8251 conformance vectors now pass.
 - fix(hybrid): restored Hybrid libopus parity by skipping SILK redundancy parsing in Hybrid, restoring the CELT `start == 0` postfilter guard, and correcting SWB Hybrid CELT end band / `effEnd` handling.
 - fix(silk): matched CELT redundancy decode end band to the packet bandwidth in SilkOnly transitions.
 - milestone(opus-decoder): `testvector05` and `testvector06` now pass RFC conformance; current sweep status is `8/12` passing vectors.
