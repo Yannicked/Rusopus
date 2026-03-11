@@ -288,19 +288,6 @@ impl Decoder {
         for &frame in pp.frames().iter() {
             let frame_samples_48k = pp.samples_per_frame_48k;
             let out_frame = &mut out[written_per_channel * self.channels as usize..];
-            if (1116..=1120).contains(&packet_idx) {
-                // #region agent log H94
-                eprintln!(
-                    "TV12 pkt{} mode={:?} config={} packet_channels={} prev_mode={:?} prev_redundancy={}",
-                    packet_idx,
-                    mode,
-                    config,
-                    pp.packet_channels,
-                    self.prev_mode,
-                    self.prev_redundancy
-                );
-                // #endregion
-            }
             match mode {
                 OpusMode::CeltOnly => {
                     if apply_celt_transition {
@@ -426,47 +413,6 @@ impl Decoder {
                         );
                     }
                     let mut redundancy_rng = 0u32;
-                    if (1116..=1120).contains(&packet_idx) {
-                        // #region agent log H95
-                        eprintln!(
-                            "TV12 pkt{} silk_frame has_redundancy={} redundancy_bytes={} celt_to_silk={} frame_samples={}",
-                            packet_idx,
-                            silk_frame.consumed_redundancy,
-                            silk_frame.redundancy_bytes,
-                            silk_frame.celt_to_silk,
-                            silk_frame.samples_per_channel
-                        );
-                        // #endregion
-                    }
-                    if packet_idx == 1118 {
-                        // #region agent log H108
-                        let f5 = (self.fs_hz as usize) / 200;
-                        let channels = self.channels as usize;
-                        let silk_pre_start =
-                            silk_frame.samples_per_channel.saturating_sub(f5) * channels;
-                        let silk_start_end = 8.min(out_frame.len());
-                        let silk_pre_end = (silk_pre_start + 8).min(out_frame.len());
-                        eprintln!(
-                            "TV12 pkt1118 silk_start[0..8]={:?}",
-                            &out_frame[..silk_start_end]
-                        );
-                        eprintln!(
-                            "TV12 pkt1118 silk_pre_fade[0..8]={:?}",
-                            &out_frame[silk_pre_start..silk_pre_end]
-                        );
-                        // #endregion
-                    }
-                    if packet_idx == 136 {
-                        // #region agent log H90
-                        eprintln!(
-                            "TV12 pkt136 silk_redundancy consumed={} bytes={} celt_to_silk={} samples_per_channel={}",
-                            silk_frame.consumed_redundancy,
-                            silk_frame.redundancy_bytes,
-                            silk_frame.celt_to_silk,
-                            silk_frame.samples_per_channel
-                        );
-                        // #endregion
-                    }
                     if silk_frame.consumed_redundancy {
                         let redundancy_data =
                             &packet_frame[packet_frame.len() - silk_frame.redundancy_bytes..];
@@ -475,7 +421,9 @@ impl Decoder {
                         let redundancy_end_band = silk_redundancy_end_band(config);
                         let mut redundancy_out =
                             vec![0i16; redundancy_samples * self.channels as usize];
-                        self.celt.reset();
+                        if !silk_frame.celt_to_silk {
+                            self.celt.reset();
+                        }
                         self.celt.set_start_band(0);
                         self.celt.set_end_band(redundancy_end_band);
                         let redundancy_frame = self.celt.decode_frame(
@@ -487,71 +435,8 @@ impl Decoder {
                             &mut redundancy_out,
                         )?;
                         self.celt.clear_end_band();
-                        if packet_idx == 136 {
-                            // #region agent log H93
-                            let probe_end = 16.min(redundancy_out.len());
-                            let abs_sum: f32 =
-                                redundancy_out.iter().map(|x| x.abs() as f32).sum();
-                            eprintln!(
-                                "TV12 pkt136 redundancy_end_band={} redundancy_out[0..16]={:?}",
-                                redundancy_end_band,
-                                &redundancy_out[..probe_end]
-                            );
-                            eprintln!("TV12 pkt136 redundancy_out abs_sum={abs_sum:.2}");
-                            // #endregion
-                        }
                         redundancy_rng = self.celt.final_range();
-                        let xor_range = self.silk.final_range() ^ redundancy_rng;
-                        if packet_idx == 1118 {
-                            // #region agent log H96
-                            eprintln!(
-                                "TV12 pkt1118 redundancy_rng={:#010x} xor_range={:#010x} celt_to_silk={}",
-                                redundancy_rng,
-                                xor_range,
-                                silk_frame.celt_to_silk
-                            );
-                            // #endregion
-                        }
-                        if packet_idx == 1118 {
-                            // #region agent log H113
-                            eprintln!(
-                                "TV12 pkt1118 crossfade_gate prev_had_redundancy={} consumed_redundancy={} celt_to_silk={} redundancy_out_len={} redundancy_frame_samples={} channels={} packet_channels={} branch_uses_silk_to_celt={}",
-                                had_redundancy,
-                                silk_frame.consumed_redundancy,
-                                silk_frame.celt_to_silk,
-                                redundancy_out.len(),
-                                redundancy_frame.samples_per_channel,
-                                self.channels,
-                                pp.packet_channels,
-                                !silk_frame.celt_to_silk
-                            );
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-                            {
-                                let ts = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
-                                let line = format!(
-                                    "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv12-celt-to-silk-gate\",\"hypothesisId\":\"H113\",\"location\":\"crates/opus-decoder/src/lib.rs\",\"message\":\"pkt1118_crossfade_gate\",\"data\":{{\"prev_had_redundancy\":{},\"consumed_redundancy\":{},\"celt_to_silk\":{},\"redundancy_out_len\":{},\"redundancy_frame_samples\":{},\"channels\":{},\"packet_channels\":{},\"branch_uses_silk_to_celt\":{}}},\"timestamp\":{}}}\n",
-                                    had_redundancy,
-                                    silk_frame.consumed_redundancy,
-                                    silk_frame.celt_to_silk,
-                                    redundancy_out.len(),
-                                    redundancy_frame.samples_per_channel,
-                                    self.channels,
-                                    pp.packet_channels,
-                                    !silk_frame.celt_to_silk,
-                                    ts
-                                );
-                                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-                            }
-                            // #endregion
-                        }
                         if !silk_frame.celt_to_silk {
-                            let f5 = (self.fs_hz as usize) / 200;
                             let overlap = (self.fs_hz as usize) / 400;
                             let channels = self.channels as usize;
                             let silk_tail_start =
@@ -559,32 +444,6 @@ impl Decoder {
                             let silk_tail_end = silk_frame.samples_per_channel * channels;
                             let redundancy_start = overlap * channels;
                             let redundancy_end = redundancy_start + overlap * channels;
-                            if packet_idx == 136 {
-                                // #region agent log H91
-                                let tail_probe_end = (silk_tail_start + 8).min(out_frame.len());
-                                let red0_end = 8.min(redundancy_out.len());
-                                let red1_end = (redundancy_start + 8).min(redundancy_out.len());
-                                eprintln!(
-                                    "TV12 pkt136 frame_size={} f5={} f2_5={} channels={}",
-                                    silk_frame.samples_per_channel,
-                                    f5,
-                                    overlap,
-                                    self.channels
-                                );
-                                eprintln!(
-                                    "TV12 pkt136 fade_start={} fade_end={} copy_start={}",
-                                    (silk_frame.samples_per_channel - f5) * channels,
-                                    (silk_frame.samples_per_channel - overlap) * channels,
-                                    (silk_frame.samples_per_channel - overlap) * channels
-                                );
-                                eprintln!(
-                                    "TV12 pkt136 pre_fade tail0_8={:?} redund0_8={:?} redund120_8={:?}",
-                                    &out_frame[silk_tail_start..tail_probe_end],
-                                    &redundancy_out[..red0_end],
-                                    &redundancy_out[redundancy_start..red1_end]
-                                );
-                                // #endregion
-                            }
                             let silk_tail = out_frame[silk_tail_start..silk_tail_end].to_vec();
                             smooth_fade_i16(
                                 &silk_tail,
@@ -595,34 +454,10 @@ impl Decoder {
                                 self.celt.window(),
                                 self.fs_hz,
                             );
-                            if packet_idx == 136 {
-                                // #region agent log H92
-                                let tail_probe_end = (silk_tail_start + 8).min(out_frame.len());
-                                eprintln!(
-                                    "TV12 pkt136 post_fade tail0_8={:?}",
-                                    &out_frame[silk_tail_start..tail_probe_end]
-                                );
-                                // #endregion
-                            }
                         } else {
                             let overlap = (self.fs_hz as usize) / 400;
                             let channels = self.channels as usize;
                             let frame_len = silk_frame.samples_per_channel * channels;
-                            if packet_idx == 1118 {
-                                // #region agent log H114
-                                let start_end = 8.min(out_frame.len());
-                                let fade_start = overlap * channels;
-                                let fade_end = (fade_start + 8).min(out_frame.len());
-                                let red0_end = 8.min(redundancy_out.len());
-                                let red1_end = (fade_start + 8).min(redundancy_out.len());
-                                eprintln!(
-                                    "TV12 pkt1118 pre_celt_to_silk out0_8={:?} redund0_8={:?} redund120_8={:?}",
-                                    &out_frame[..start_end],
-                                    &redundancy_out[..red0_end],
-                                    &redundancy_out[fade_start..red1_end]
-                                );
-                                // #endregion
-                            }
                             apply_transition_fade_i16(
                                 &redundancy_out,
                                 &mut out_frame[..frame_len],
@@ -631,68 +466,6 @@ impl Decoder {
                                 self.celt.window(),
                                 self.fs_hz,
                             );
-                            if packet_idx == 1118 {
-                                // #region agent log H115
-                                let start_end = 8.min(out_frame.len());
-                                let fade_start = overlap * channels;
-                                let fade_end = (fade_start + 8).min(out_frame.len());
-                                eprintln!(
-                                    "TV12 pkt1118 post_celt_to_silk out0_8={:?} out120_8={:?}",
-                                    &out_frame[..start_end],
-                                    &out_frame[fade_start..fade_end]
-                                );
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-                                {
-                                    let ts = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis())
-                                        .unwrap_or(0);
-                                    let line = format!(
-                                        "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv12-celt-to-silk-apply\",\"hypothesisId\":\"H115\",\"location\":\"crates/opus-decoder/src/lib.rs\",\"message\":\"pkt1118_celt_to_silk_applied\",\"data\":{{\"out0_8\":{:?},\"out120_8\":{:?},\"overlap\":{},\"frame_len\":{},\"redundancy_len\":{}}},\"timestamp\":{}}}\n",
-                                        &out_frame[..start_end],
-                                        &out_frame[fade_start..fade_end],
-                                        overlap.min(redundancy_frame.samples_per_channel / 2),
-                                        frame_len,
-                                        redundancy_out.len(),
-                                        ts
-                                    );
-                                    let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-                                }
-                                // #endregion
-                            }
-                        }
-                        if packet_idx == 4 {
-                            // #region agent log H50
-                            let fade_start = ((self.fs_hz as usize) / 400) * self.channels as usize;
-                            let fade_end = (fade_start + 8).min(redundancy_out.len());
-                            eprintln!(
-                                "DBG H50 rust pkt4 redundancy_probe bytes={} decoded={} redundant_rng={:#010x} xor_final_range={:#010x} out0_8={:?} fade_in_8={:?}",
-                                silk_frame.redundancy_bytes,
-                                redundancy_frame.samples_per_channel,
-                                redundancy_rng,
-                                xor_range,
-                                &redundancy_out[..8.min(redundancy_out.len())],
-                                &redundancy_out[fade_start..fade_end]
-                            );
-                            if !silk_frame.celt_to_silk {
-                                let energy = self.celt.prev_energy_head(5);
-                                eprintln!(
-                                    "R pkt4 post_redund decode_mem_abs={:.4} right={:.4} deemph={:.6} {:.6}",
-                                    self.celt.decode_mem_abs_sum(),
-                                    self.celt.decode_mem_right_abs_sum(),
-                                    self.celt.deemph_mem(0),
-                                    self.celt.deemph_mem(1)
-                                );
-                                eprintln!(
-                                    "R pkt4 post_redund energy[0..{}]={:?}",
-                                    energy.len(),
-                                    energy
-                                );
-                            }
-                            // #endregion
                         }
                     }
                     had_redundancy = silk_frame.consumed_redundancy && !silk_frame.celt_to_silk;
