@@ -57,7 +57,6 @@ pub(crate) struct SilkDecoder {
     lbrr_state: [lbrr::ChannelState; 2],
     core_state: [decode_core::SilkChannelState; 2],
     resampler_state: [Option<resampler::SilkResampler>; 2],
-    resampler_history: [[i16; 2]; 2],
     stereo_state: stereo::StereoState,
     prev_nlsf_q15: [[i16; tables::MAX_LPC_ORDER]; 2],
     pred_coef_q12: [[[[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
@@ -82,7 +81,6 @@ impl SilkDecoder {
                 decode_core::SilkChannelState::default(),
             ],
             resampler_state: [None, None],
-            resampler_history: [[0; 2]; 2],
             stereo_state: stereo::StereoState::default(),
             prev_nlsf_q15: [[0; tables::MAX_LPC_ORDER]; 2],
             pred_coef_q12: [[[[0; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES]; MAX_INTERNAL_FRAMES]; 2],
@@ -104,7 +102,6 @@ impl SilkDecoder {
             decode_core::SilkChannelState::default(),
         ];
         self.resampler_state = [None, None];
-        self.resampler_history = [[0; 2]; 2];
         self.stereo_state = stereo::StereoState::default();
         self.prev_nlsf_q15 = [[0; tables::MAX_LPC_ORDER]; 2];
         self.pred_coef_q12 =
@@ -181,6 +178,7 @@ impl SilkDecoder {
         let internal_fs_hz = silk_internal_fs_hz(config)?;
         let (internal_frames, nb_subfr, frame_length) =
             internal_frame_shape(frame_samples_48k, internal_fs_hz)?;
+        let mut mono_resampler_history = self.stereo_state.s_mid;
         if packet_idx == 0 && (12..=15).contains(&config) {
             // #region agent log H65
             eprintln!(
@@ -255,7 +253,6 @@ impl SilkDecoder {
                 if needs_reset {
                     self.resampler_state[ch] =
                         Some(resampler::SilkResampler::new(internal_fs_hz, self.fs_hz)?);
-                    self.resampler_history[ch] = [0; 2];
                 }
             }
             if self.channels == 2 && packet_channels == 2 && self.prev_packet_channels == 1 {
@@ -501,14 +498,14 @@ impl SilkDecoder {
                             )
                         } else {
                             let mut resamp_input = vec![0i16; frame_length + 2];
-                            resamp_input[..2].copy_from_slice(&self.resampler_history[ch]);
+                            resamp_input[..2].copy_from_slice(&mono_resampler_history);
                             resamp_input[2..2 + frame_length].copy_from_slice(frame_pcm);
                             let written = resampler.process(
                                 &resamp_input[1..1 + frame_length],
                                 &mut resampled_pcm[ch][written_total..written_total + expected],
                             );
-                            self.resampler_history[ch][0] = resamp_input[frame_length];
-                            self.resampler_history[ch][1] = resamp_input[frame_length + 1];
+                            mono_resampler_history
+                                .copy_from_slice(&frame_pcm[frame_length - 2..frame_length]);
                             written
                         };
                         debug_assert_eq!(written, expected);
