@@ -2205,7 +2205,8 @@ pub(crate) fn quant_all_bands_stereo(
 
 /// De-normalize normalized bands to MDCT bins using decoded energies.
 ///
-/// Params: mode, normalized `x`, output `freq`, decoded `band_loge` and band range.
+/// Params: mode, normalized `x`, output `freq`, decoded `band_loge`, band range,
+/// and `silence` flag forcing zero spectrum output.
 /// Returns: nothing.
 pub(crate) fn denormalise_bands(
     mode: &CeltMode,
@@ -2215,7 +2216,12 @@ pub(crate) fn denormalise_bands(
     start: usize,
     end: usize,
     lm: usize,
+    silence: bool,
 ) {
+    if silence {
+        freq.fill(0.0);
+        return;
+    }
     let m = 1usize << lm;
     for i in start..end {
         let j0 = m * mode.e_bands[i] as usize;

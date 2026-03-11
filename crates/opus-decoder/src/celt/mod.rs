@@ -816,13 +816,16 @@ impl CeltDecoder {
             );
             // #endregion
         }
-        let _silence_flag = if tell >= total_bits {
+        let silence_flag = if tell >= total_bits {
             true
         } else if tell == 1 {
             ec.dec_bit_logp(15)
         } else {
             false
         };
+        if silence_flag {
+            tell = total_bits;
+        }
         if self.start_band == 17 && packet_idx == 0 {
             // #region agent log H78
             eprintln!(
@@ -1996,6 +1999,15 @@ impl CeltDecoder {
             );
             // #endregion
         }
+        if silence_flag {
+            let state_channels = coded_channels.min(2);
+            for c in 0..state_channels {
+                let base = c * self.mode.nb_ebands;
+                for i in 0..self.mode.nb_ebands {
+                    self.prev_energy[base + i] = LOG_ENERGY_FLOOR_DB;
+                }
+            }
+        }
         let mut denorm = vec![0.0f32; frame_size_48k];
         bands::denormalise_bands(
             self.mode,
@@ -2005,6 +2017,7 @@ impl CeltDecoder {
             start,
             end,
             lm,
+            silence_flag,
         );
         if packet_idx == 905 {
             let denorm_abs_sum: f32 = denorm.iter().map(|x| x.abs()).sum();
@@ -2042,6 +2055,7 @@ impl CeltDecoder {
                     start,
                     end,
                     lm,
+                    silence_flag,
                 );
                 if self.channels == 1 {
                     let sum_l_before: f32 = denorm.iter().map(|x| x.abs()).sum();
