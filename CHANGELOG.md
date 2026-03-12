@@ -5,16 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-### Added
 - bench: added `crates/bench-compare/` crate with FFI wrapper around libopus C
   (`opus_decode`) and criterion benchmarks comparing Rust vs C on CELT/SILK/Hybrid.
   Baseline results (correctness-first, no optimization):
-  CELT mono 48k: Rust 803ms vs C 20.3ms (~40x);
-  SILK NB 8k: Rust 10.3ms vs C 7.4ms (~1.4x);
-  Hybrid FB 48k: Rust 2.16s vs C 35.2ms (~61x).
+  CELT mono 48k: Rust 803ms vs C 20.3ms (~40×);
+  SILK NB 8k: Rust 10.3ms vs C 7.4ms (~1.4×);
+  Hybrid FB 48k: Rust 2.16s vs C 35.2ms (~61×).
   SILK nearly matches C; CELT/Hybrid gap expected — libopus uses SIMD and
-  hand-optimized float paths not yet present in rasopus.
-  Commit: bench-compare baseline.
+  hand-optimized float paths not yet present in rasopus. Commit `2475647`.
+
+## [0.1.1] - 2026-03-12
+
+### Fixed
+- Corrected repository and homepage URLs in `Cargo.toml` to
+  `https://github.com/TadeuszWolfGang/Rusopus`.
 
 ## [0.1.0] - 2026-03-12
 
@@ -45,4 +49,5 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Project planning/docs baseline: `OPUS_PORT_PLAN.md` was rebuilt to match libopus decoder requirements, including corrected CELT/SILK sample-rate architecture, expanded phased plan details, a decoder state model, RFC 8251 errata notes, and Rust module mapping.
 - RFC 8251 conformance milestones: CELT mono `testvector07` reached bit-exact `final_range` parity and `98.1%` `opus_compare` quality, `testvector05` and `testvector06` brought the sweep to `8/12`, and the decoder ultimately reached `12/12` passing RFC 8251 vectors.
 
+[0.1.1]: https://github.com/TadeuszWolfGang/Rusopus/releases/tag/v0.1.1
 [0.1.0]: https://github.com/tadeuszwojcik/rasopus/releases/tag/v0.1.0
