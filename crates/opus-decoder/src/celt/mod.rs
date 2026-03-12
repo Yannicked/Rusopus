@@ -13,8 +13,8 @@
     clippy::unnecessary_cast
 )]
 
-use crate::entropy::EcDec;
 use crate::Error;
+use crate::entropy::EcDec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod bands;

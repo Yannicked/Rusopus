@@ -5,7 +5,7 @@
 //! Current scope is a decoder-oriented path for 48 kHz / 20 ms (`LM=3`), with
 //! explicit overlap/window processing kept close to libopus flow.
 
-use crate::celt::kiss_fft::{flat_fft_forward, KissFft};
+use crate::celt::kiss_fft::{KissFft, flat_fft_forward};
 
 /// Backward MDCT helper for CELT decode path.
 #[derive(Debug, Clone)]

@@ -1,7 +1,7 @@
 //! SILK LBRR payload bit-consumption helpers (Phase 3a).
 
-use crate::entropy::EcDec;
 use crate::Error;
+use crate::entropy::EcDec;
 
 use super::entropy_tables;
 use super::tables;

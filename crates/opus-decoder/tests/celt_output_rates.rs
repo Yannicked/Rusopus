@@ -1,7 +1,7 @@
 mod common;
 
 use common::load_packets;
-use opus_decoder::{Decoder, OpusDecoder};
+use opus_decoder::OpusDecoder;
 
 /// Decode CELT packets successfully at every supported public output rate.
 ///
@@ -13,7 +13,7 @@ fn celt_output_rates_decode_successfully() {
     let sample_packets = &packets[..128];
 
     let mut reference = OpusDecoder::new(48_000, 1).unwrap();
-    let mut reference_pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
+    let mut reference_pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
     let mut reference_sizes = Vec::with_capacity(sample_packets.len());
     for packet in sample_packets {
         reference_sizes.push(reference.decode(packet, &mut reference_pcm, false).unwrap());
@@ -21,7 +21,7 @@ fn celt_output_rates_decode_successfully() {
 
     for fs in [8_000u32, 12_000, 16_000, 24_000, 48_000] {
         let mut decoder = OpusDecoder::new(fs, 1).unwrap();
-        let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
+        let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
         for (packet_idx, packet) in sample_packets.iter().enumerate() {
             let written = decoder
                 .decode(packet, &mut pcm, false)
@@ -45,7 +45,7 @@ fn celt_output_rates_decode_successfully() {
 fn celt_plc_supports_24k_output() {
     let packets = load_packets("testvector07").unwrap();
     let mut decoder = OpusDecoder::new(24_000, 1).unwrap();
-    let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
+    let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
 
     for packet in packets.iter().take(10) {
         decoder.decode(packet, &mut pcm, false).unwrap();

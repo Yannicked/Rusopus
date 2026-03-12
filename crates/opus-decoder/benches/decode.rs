@@ -3,9 +3,9 @@ mod common;
 
 use common::{build_multistream_packet, load_packets, load_vector_spec};
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
-use opus_decoder::{Decoder, OpusDecoder, OpusMultistreamDecoder};
+use opus_decoder::{OpusDecoder, OpusMultistreamDecoder};
 use std::time::Duration;
 
 /// Benchmark throughput for each major Opus decoding mode.
@@ -138,7 +138,7 @@ fn bench_multistream_overhead(c: &mut Criterion) {
 /// Returns: total interleaved i16 samples decoded across all packets.
 fn decode_all_i16(sample_rate: u32, channels: usize, packets: &[Vec<u8>]) -> usize {
     let mut decoder = OpusDecoder::new(sample_rate, channels).expect("failed to create decoder");
-    let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * channels];
+    let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * channels];
     let mut total_samples = 0usize;
 
     for packet in packets {
@@ -162,7 +162,7 @@ fn decode_all_i16(sample_rate: u32, channels: usize, packets: &[Vec<u8>]) -> usi
 fn decode_all_multistream(packets: &[Vec<u8>]) -> usize {
     let mut decoder =
         OpusMultistreamDecoder::new(48_000, 2, 2, 0, &[0, 1]).expect("failed to create decoder");
-    let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * 2];
     let mut total_samples = 0usize;
 
     for packet in packets {
@@ -182,9 +182,9 @@ fn decode_all_multistream(packets: &[Vec<u8>]) -> usize {
 fn decode_all_two_decoders(packets: &[Vec<u8>]) -> usize {
     let mut left = OpusDecoder::new(48_000, 1).expect("failed to create left decoder");
     let mut right = OpusDecoder::new(48_000, 1).expect("failed to create right decoder");
-    let mut left_pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
-    let mut right_pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
-    let mut stereo_pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut left_pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
+    let mut right_pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
+    let mut stereo_pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * 2];
     let mut total_samples = 0usize;
 
     for packet in packets {
@@ -216,7 +216,7 @@ fn decode_all_two_decoders(packets: &[Vec<u8>]) -> usize {
 /// Returns: warmed decoder plus reusable PCM buffer.
 fn prepare_plc_state(packets: &[Vec<u8>]) -> (OpusDecoder, Vec<i16>) {
     let mut decoder = OpusDecoder::new(48_000, 1).expect("failed to create PLC decoder");
-    let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
+    let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
 
     for packet in packets.iter().take(10) {
         decoder

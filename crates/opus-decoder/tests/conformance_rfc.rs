@@ -1,10 +1,13 @@
 #![allow(unused_variables, unused_assignments, clippy::collapsible_if)]
 
+#[path = "../src/compare.rs"]
+mod compare;
+
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use opus_decoder::{Decoder, Error, OpusDecoder};
+use opus_decoder::{OpusDecoder, OpusError};
 
 #[derive(Debug)]
 struct Vector {
@@ -87,8 +90,8 @@ fn plc_smoke_test() {
 
     let mut decoder_i16 = OpusDecoder::new(48_000, 1).expect("failed to create CELT i16 decoder");
     let mut decoder_f32 = OpusDecoder::new(48_000, 1).expect("failed to create CELT f32 decoder");
-    let mut pcm_i16 = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
-    let mut pcm_f32 = vec![0.0f32; Decoder::MAX_FRAME_SIZE_48K];
+    let mut pcm_i16 = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K];
+    let mut pcm_f32 = vec![0.0f32; OpusDecoder::MAX_FRAME_SIZE_48K];
     let mut last_good_rms = 0.0f64;
     let mut last_loss_rms = 0.0f64;
 
@@ -100,9 +103,11 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut pcm_f32, false)
             .expect("normal CELT f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(pcm_f32[..samples_f32]
-            .iter()
-            .all(|sample| sample.is_finite()));
+        assert!(
+            pcm_f32[..samples_f32]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
         last_good_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
         eprintln!("celt pre-loss frame {frame_idx} rms={last_good_rms:.6}");
     }
@@ -116,9 +121,11 @@ fn plc_smoke_test() {
             .expect("CELT PLC f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
         assert!(samples_f32 > 0, "PLC should reuse the last packet duration");
-        assert!(pcm_f32[..samples_f32]
-            .iter()
-            .all(|sample| sample.is_finite()));
+        assert!(
+            pcm_f32[..samples_f32]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
         last_loss_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
         eprintln!("celt loss frame {loss_idx} rms={last_loss_rms:.6}");
     }
@@ -136,9 +143,11 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut pcm_f32, false)
             .expect("post-loss CELT f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(pcm_f32[..samples_f32]
-            .iter()
-            .all(|sample| sample.is_finite()));
+        assert!(
+            pcm_f32[..samples_f32]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
         let rms = frame_rms_f32(&pcm_f32[..samples_f32]);
         eprintln!("celt post-loss frame {frame_idx} rms={rms:.6}");
     }
@@ -158,8 +167,8 @@ fn plc_smoke_test() {
         OpusDecoder::new(48_000, 2).expect("failed to create SILK i16 decoder");
     let mut silk_decoder_f32 =
         OpusDecoder::new(48_000, 2).expect("failed to create SILK f32 decoder");
-    let mut silk_pcm_i16 = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * 2];
-    let mut silk_pcm_f32 = vec![0.0f32; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut silk_pcm_i16 = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * 2];
+    let mut silk_pcm_f32 = vec![0.0f32; OpusDecoder::MAX_FRAME_SIZE_48K * 2];
     let mut silk_loss_rms = Vec::new();
 
     for (frame_idx, packet) in silk_payloads.iter().take(10).enumerate() {
@@ -170,9 +179,11 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut silk_pcm_f32, false)
             .expect("normal SILK f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(silk_pcm_f32[..samples_f32 * 2]
-            .iter()
-            .all(|sample| sample.is_finite()));
+        assert!(
+            silk_pcm_f32[..samples_f32 * 2]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
         let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
         eprintln!("silk pre-loss frame {frame_idx} rms={rms:.6}");
     }
@@ -189,9 +200,11 @@ fn plc_smoke_test() {
             samples_f32 > 0,
             "SILK PLC should reuse the last packet duration"
         );
-        assert!(silk_pcm_f32[..samples_f32 * 2]
-            .iter()
-            .all(|sample| sample.is_finite()));
+        assert!(
+            silk_pcm_f32[..samples_f32 * 2]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
         let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
         assert!(rms > 0.0, "SILK PLC should not output silence");
         silk_loss_rms.push(rms);
@@ -213,9 +226,11 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut silk_pcm_f32, false)
             .expect("post-loss SILK f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(silk_pcm_f32[..samples_f32 * 2]
-            .iter()
-            .all(|sample| sample.is_finite()));
+        assert!(
+            silk_pcm_f32[..samples_f32 * 2]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
         let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
         eprintln!("silk post-loss frame {frame_idx} rms={rms:.6}");
     }
@@ -251,8 +266,8 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         .map(|p| load_pcm16le(&p))
         .transpose()?;
 
-    let mut dec = Decoder::new(v.fs_hz, v.channels)?;
-    let mut out = vec![0i16; dec.max_frame_size_per_channel() * v.channels as usize];
+    let mut dec = OpusDecoder::new(v.fs_hz, usize::from(v.channels))?;
+    let mut out = vec![0i16; dec.max_frame_size_per_channel() * usize::from(v.channels)];
     let mut got_pcm = Vec::<i16>::new();
     let mut packet_end_samples = Vec::<usize>::new();
     let mut final_range_mismatches: Vec<(usize, u32, u32)> = Vec::new();
@@ -271,7 +286,8 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         std::env::var("OPUS_TRACE_PACKET_MAX_DELTA").ok().as_deref() == Some("1");
 
     for (packet_idx, p) in packets.into_iter().enumerate() {
-        match dec.decode(p.packet.as_deref(), &mut out) {
+        let packet = p.packet.as_deref().unwrap_or(&[]);
+        match dec.decode(packet, &mut out, false) {
             Ok(samples_per_channel) => {
                 let pkt_start = got_pcm.len();
                 let written = samples_per_channel * v.channels as usize;
@@ -448,7 +464,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                     }
                 }
             }
-            Err(Error::NotImplemented) => {
+            Err(OpusError::InternalError) => {
                 return Err("decoder not implemented yet".into());
             }
             Err(e) => return Err(format!("decode failed: {e}").into()),
@@ -658,7 +674,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             }
         }
     }
-    let q0 = opus_decoder::compare::compare_quality(
+    let q0 = compare::compare_quality(
         &expected_pcm,
         &got_pcm,
         v.channels as usize,
@@ -670,7 +686,7 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
     }
     if let Some(alt_pcm) = &alt_pcm {
         if alt_pcm.len() == expected_pcm.len() {
-            let q1 = opus_decoder::compare::compare_quality(
+            let q1 = compare::compare_quality(
                 alt_pcm,
                 &got_pcm,
                 v.channels as usize,

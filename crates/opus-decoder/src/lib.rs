@@ -16,8 +16,7 @@ macro_rules! debug_trace {
 }
 
 mod celt;
-#[doc(hidden)]
-pub mod compare;
+pub(crate) mod compare;
 mod entropy;
 mod error;
 mod multistream;
@@ -26,7 +25,7 @@ mod silk;
 use crate::entropy::EcDec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-pub use error::Error;
+pub(crate) use error::Error;
 pub use multistream::OpusMultistreamDecoder;
 
 static TRACE_DECODE_PACKET_IDX: AtomicUsize = AtomicUsize::new(0);
@@ -43,6 +42,9 @@ pub struct OpusDecoder {
 }
 
 impl OpusDecoder {
+    /// Maximum decoded frame size per channel at 48 kHz.
+    pub const MAX_FRAME_SIZE_48K: usize = Decoder::MAX_FRAME_SIZE_48K;
+
     /// Create a new decoder.
     ///
     /// `sample_rate` must be `8000`, `12000`, `16000`, `24000`, or `48000`,
@@ -68,6 +70,11 @@ impl OpusDecoder {
             loss_count: 0,
             last_packet_duration: 0,
         })
+    }
+
+    /// Return the maximum decoded frame size per channel for this output rate.
+    pub fn max_frame_size_per_channel(&self) -> usize {
+        self.decoder.max_frame_size_per_channel()
     }
 
     /// Mirror internal PLC bookkeeping into the public wrapper.
@@ -181,6 +188,41 @@ impl OpusDecoder {
         self.loss_count = 0;
         self.last_packet_duration = 0;
     }
+
+    /// Return the last range-coder final state observed by the decoder.
+    pub fn final_range(&self) -> u32 {
+        self.decoder.final_range()
+    }
+
+    /// Return the last CELT recursive split count.
+    #[doc(hidden)]
+    pub fn last_split_count(&self) -> usize {
+        self.decoder.last_split_count()
+    }
+
+    /// Return the current deemphasis memory for channel 0.
+    #[doc(hidden)]
+    pub fn deemph_mem(&self) -> f32 {
+        self.decoder.deemph_mem()
+    }
+
+    /// Return whether the last CELT frame used the transient path.
+    #[doc(hidden)]
+    pub fn last_is_transient(&self) -> bool {
+        self.decoder.last_is_transient()
+    }
+
+    /// Return whether the last decoded packet carried SILK redundancy.
+    #[doc(hidden)]
+    pub fn last_had_redundancy(&self) -> bool {
+        self.decoder.last_had_redundancy()
+    }
+
+    /// Return whether the last decoded SILK redundancy was CELT-to-SILK.
+    #[doc(hidden)]
+    pub fn last_celt_to_silk(&self) -> bool {
+        self.decoder.last_celt_to_silk()
+    }
 }
 
 /// Errors returned by the public Opus decoding API.
@@ -213,7 +255,7 @@ impl From<Error> for OpusError {
 }
 
 #[derive(Debug, Clone)]
-pub struct Decoder {
+pub(crate) struct Decoder {
     fs_hz: u32,
     channels: u8,
     celt: celt::CeltDecoder,
@@ -237,9 +279,9 @@ pub(crate) enum OpusMode {
 }
 
 impl Decoder {
-    pub const MAX_FRAME_SIZE_48K: usize = 5760; // 120 ms @ 48 kHz
+    pub(crate) const MAX_FRAME_SIZE_48K: usize = 5760; // 120 ms @ 48 kHz
 
-    pub fn new(fs_hz: u32, channels: u8) -> Result<Self, Error> {
+    pub(crate) fn new(fs_hz: u32, channels: u8) -> Result<Self, Error> {
         if !matches!(fs_hz, 8000 | 12000 | 16000 | 24000 | 48000) {
             return Err(Error::InvalidSampleRate(fs_hz));
         }
@@ -263,15 +305,15 @@ impl Decoder {
         })
     }
 
-    pub fn fs_hz(&self) -> u32 {
+    pub(crate) fn fs_hz(&self) -> u32 {
         self.fs_hz
     }
 
-    pub fn channels(&self) -> u8 {
+    pub(crate) fn channels(&self) -> u8 {
         self.channels
     }
 
-    pub fn max_frame_size_per_channel(&self) -> usize {
+    pub(crate) fn max_frame_size_per_channel(&self) -> usize {
         // Opus internally decodes 48 kHz and can output other Fs by deterministic
         // downsampling/decimation (libopus behavior).
         match self.fs_hz {
@@ -364,7 +406,7 @@ impl Decoder {
         Ok(samples_per_channel)
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         // Placeholder. The real implementation will reset SILK/CELT state.
         self.celt.reset();
         self.silk.reset();
@@ -380,42 +422,42 @@ impl Decoder {
     }
 
     /// Return range coder final state for conformance comparison.
-    pub fn final_range(&self) -> u32 {
+    pub(crate) fn final_range(&self) -> u32 {
         self.last_final_range
     }
 
     /// Return recursive split count from last decoded frame.
     ///
     /// This is a debug metric used for CELT split-path diagnostics.
-    pub fn last_split_count(&self) -> usize {
+    pub(crate) fn last_split_count(&self) -> usize {
         self.last_packet_split_count
     }
 
     /// Return deemphasis memory for channel 0 (debug metric).
     ///
     /// This is used for CELT synthesis diagnostics in mono vectors.
-    pub fn deemph_mem(&self) -> f32 {
+    pub(crate) fn deemph_mem(&self) -> f32 {
         self.celt.deemph_mem(0)
     }
 
     /// Return whether the last CELT frame was transient.
     ///
     /// This is a compatibility helper for the local conformance harness.
-    pub fn last_is_transient(&self) -> bool {
+    pub(crate) fn last_is_transient(&self) -> bool {
         false
     }
 
     /// Return whether the last decoded packet carried SILK redundancy.
     ///
     /// This follows the top-level transition bookkeeping used by the decoder.
-    pub fn last_had_redundancy(&self) -> bool {
+    pub(crate) fn last_had_redundancy(&self) -> bool {
         self.last_had_redundancy
     }
 
     /// Return whether the last decoded SILK redundancy was CELT-to-SILK.
     ///
     /// This is a debug helper for transition tracing in the conformance harness.
-    pub fn last_celt_to_silk(&self) -> bool {
+    pub(crate) fn last_celt_to_silk(&self) -> bool {
         self.last_celt_to_silk
     }
 
@@ -424,7 +466,11 @@ impl Decoder {
     /// - `packet=None` triggers PLC (packet loss concealment).
     /// - `out` must be large enough for the maximum frame size (120 ms).
     /// - Returns the number of samples per channel written.
-    pub fn decode(&mut self, packet: Option<&[u8]>, out: &mut [i16]) -> Result<usize, Error> {
+    pub(crate) fn decode(
+        &mut self,
+        packet: Option<&[u8]>,
+        out: &mut [i16],
+    ) -> Result<usize, Error> {
         let packet_idx = TRACE_DECODE_PACKET_IDX.fetch_add(1, Ordering::SeqCst);
         let (toc, samples_per_channel_needed) = match packet {
             Some(packet) => {

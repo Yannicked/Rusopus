@@ -4,8 +4,8 @@
 //! state while keeping the implementation close to the reference decoder.
 #![allow(clippy::too_many_arguments, clippy::needless_borrow)]
 
-use crate::entropy::EcDec;
 use crate::Error;
+use crate::entropy::EcDec;
 
 mod decode_core;
 mod entropy_tables;

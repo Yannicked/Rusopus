@@ -1,7 +1,7 @@
 [package]
 name = "opus-decoder"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 rust-version = "1.85"
 description = "Pure-Rust Opus decoder — RFC 8251 conformant, no unsafe, no FFI"
 license = "MIT OR Apache-2.0"

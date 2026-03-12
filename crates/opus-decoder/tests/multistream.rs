@@ -1,7 +1,7 @@
 mod common;
 
 use common::{build_multistream_packet, load_packets};
-use opus_decoder::{Decoder, OpusMultistreamDecoder};
+use opus_decoder::{OpusDecoder, OpusMultistreamDecoder};
 
 /// Verify the call-recording use case with two independent mono streams.
 ///
@@ -13,13 +13,15 @@ fn multistream_stereo_call_recording() {
     let packet = build_multistream_packet(&[&packets[0], &packets[1]]);
 
     let mut decoder = OpusMultistreamDecoder::new(48_000, 2, 2, 0, &[0, 1]).unwrap();
-    let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * 2];
     let samples = decoder.decode(&packet, &mut pcm, false).unwrap();
 
     assert!(samples > 0);
-    assert!(pcm[..samples * 2]
-        .chunks_exact(2)
-        .any(|frame| frame[0] != frame[1]));
+    assert!(
+        pcm[..samples * 2]
+            .chunks_exact(2)
+            .any(|frame| frame[0] != frame[1])
+    );
 }
 
 /// Verify that mapping value `255` silences the corresponding output channel.
@@ -32,13 +34,15 @@ fn multistream_silence_channel() {
     let packet = &packets[0];
 
     let mut decoder = OpusMultistreamDecoder::new(48_000, 2, 1, 0, &[0, 255]).unwrap();
-    let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut pcm = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * 2];
     let samples = decoder.decode(packet, &mut pcm, false).unwrap();
 
     assert!(samples > 0);
-    assert!(pcm[..samples * 2]
-        .chunks_exact(2)
-        .all(|frame| frame[1] == 0));
+    assert!(
+        pcm[..samples * 2]
+            .chunks_exact(2)
+            .all(|frame| frame[1] == 0)
+    );
 }
 
 /// Reject invalid multistream topology arguments.
