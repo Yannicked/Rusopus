@@ -7,6 +7,7 @@ use opus_decoder::OpusDecoder;
 ///
 /// Parameters: none.
 /// Returns: nothing; panics if any supported CELT output rate regresses.
+#[ignore = "requires OPUS_TESTVECTORS_DIR"]
 #[test]
 fn celt_output_rates_decode_successfully() {
     let packets = load_packets("testvector07").unwrap();
@@ -41,6 +42,7 @@ fn celt_output_rates_decode_successfully() {
 ///
 /// Parameters: none.
 /// Returns: nothing; panics if PLC regresses for low-rate CELT output.
+#[ignore = "requires OPUS_TESTVECTORS_DIR"]
 #[test]
 fn celt_plc_supports_24k_output() {
     let packets = load_packets("testvector07").unwrap();
