@@ -20,12 +20,14 @@ mod celt;
 pub mod compare;
 mod entropy;
 mod error;
+mod multistream;
 mod packet;
 mod silk;
 use crate::entropy::EcDec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use error::Error;
+pub use multistream::OpusMultistreamDecoder;
 
 static TRACE_DECODE_PACKET_IDX: AtomicUsize = AtomicUsize::new(0);
 

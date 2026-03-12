@@ -22,6 +22,12 @@
   separate CELT highband PLC (acceptable for now). Reference read from
   `/tmp/libopus-tv09/silk/` (local mirror). Clippy clean, plc_smoke_test PASS,
   RFC conformance: 12/12 PASS.
+- feat(multistream): Phase 6 – `OpusMultistreamDecoder` in `src/multistream.rs`
+  with `new`, `decode`, `decode_float`, `reset`; mapping validation (255=silence,
+  out-of-range → InvalidArgument); `split_multistream_packet()` helper with
+  self-delimiting length prefix per libopus `opus_multistream_decode_native()`.
+  Exported via `lib.rs`. Tests: stereo call-recording simulation, silence channel
+  mapping, invalid args. Clippy clean, RFC conformance: 12/12 PASS.
 
 ## 2026-03-09
 
