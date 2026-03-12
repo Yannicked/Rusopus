@@ -1,6 +1,33 @@
-.cursor/
-crates/opus-cli/
-target/
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Criterion benchmark output
+/crates/opus-decoder/target/
+
+# Test vector data (large, downloaded separately via cargo xtask fetch-vectors)
+testdata/opus_testvectors/*.bit
+testdata/opus_testvectors/*.dec
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverrides
+._*
+
+# Editor
+.idea/
 .vscode/
-*.pcm
-/tmp/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+
+# Benchmark baselines (optional: keep or ignore depending on preference)
+# Uncomment to exclude criterion baselines from git:
+# crates/opus-decoder/target/criterion/
+
+.cursor/
+.DS_Store

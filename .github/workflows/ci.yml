@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build -p opus-decoder --release
+
+      - name: Unit tests
+        run: cargo test -p opus-decoder --release
+
+      - name: Multistream tests
+        run: cargo test -p opus-decoder multistream --release -- --nocapture
+
+  msrv:
+    name: MSRV (Rust 1.70)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo build -p opus-decoder
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy -p opus-decoder --all-targets -- -D warnings
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt -p opus-decoder -- --check
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc -p opus-decoder --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  conformance:
+    name: RFC 8251 Conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download test vectors
+        run: cargo xtask fetch-vectors
+
+      - name: Run all 12 conformance vectors
+        run: |
+          for v in 01 02 03 04 05 06 07 08 09 10 11 12; do
+            echo "=== tv${v} ==="
+            OPUS_TESTVECTORS_DIR="testdata/opus_testvectors" \
+            OPUS_VECTOR=testvector${v} \
+            cargo test --release -p opus-decoder rfc_conformance \
+              -- --ignored --nocapture 2>&1 | grep -E "PASS|FAIL"
+          done

@@ -1,10 +1,17 @@
 [package]
 name = "opus-decoder"
 version = "0.1.0"
-edition.workspace = true
-license.workspace = true
-rust-version = "1.93.0"
-description = "Pure Rust Opus decoder (no FFI) - decoder-first port of libopus"
+edition = "2021"
+rust-version = "1.85"
+description = "Pure-Rust Opus decoder — RFC 8251 conformant, no unsafe, no FFI"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tadeuszwojcik/rasopus"
+homepage = "https://github.com/tadeuszwojcik/rasopus"
+documentation = "https://docs.rs/opus-decoder"
+readme = "../../README.md"
+keywords = ["opus", "audio", "codec", "decoder", "rfc8251"]
+categories = ["multimedia::audio"]
+exclude = ["testdata/", "benches/", ".github/"]
 
 [dependencies]
 thiserror = "2.0.18"

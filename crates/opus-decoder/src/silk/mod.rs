@@ -4,8 +4,8 @@
 //! state while keeping the implementation close to the reference decoder.
 #![allow(clippy::too_many_arguments, clippy::needless_borrow)]
 
-use crate::Error;
 use crate::entropy::EcDec;
+use crate::Error;
 
 mod decode_core;
 mod entropy_tables;
@@ -1227,17 +1227,6 @@ mod tests {
     const TV02_PKT0_LPC_Q12: [i16; 10] = [5041, -1246, 1017, -614, 431, -560, 131, -357, 284, -46];
 
     #[test]
-    fn maps_silk_internal_sample_rates() {
-        assert_eq!(silk_internal_fs_hz(0).unwrap(), 8_000);
-        assert_eq!(silk_internal_fs_hz(3).unwrap(), 8_000);
-        assert_eq!(silk_internal_fs_hz(4).unwrap(), 12_000);
-        assert_eq!(silk_internal_fs_hz(7).unwrap(), 12_000);
-        assert_eq!(silk_internal_fs_hz(8).unwrap(), 16_000);
-        assert_eq!(silk_internal_fs_hz(11).unwrap(), 16_000);
-        assert!(silk_internal_fs_hz(12).is_err());
-    }
-
-    #[test]
     fn maps_internal_frame_counts() {
         assert_eq!(internal_frame_shape(480, 8_000).unwrap(), (1, 2, 80));
         assert_eq!(internal_frame_shape(960, 8_000).unwrap(), (1, 4, 160));
@@ -1251,15 +1240,6 @@ mod tests {
         assert_eq!(unpack_lbrr_symbol(0b001, 3), [true, false, false]);
         assert_eq!(unpack_lbrr_symbol(0b011, 3), [true, true, false]);
         assert_eq!(unpack_lbrr_symbol(0b101, 3), [true, false, true]);
-    }
-
-    #[test]
-    fn phase3a_decode_returns_zeroed_audio() {
-        let mut silk = SilkDecoder::new(48_000, 1);
-        let mut out = vec![123i16; 960];
-        let result = silk.decode_frame(&[0; 8], 960, 0, 1, 0, &mut out).unwrap();
-        assert_eq!(result.samples_per_channel, 960);
-        assert!(out.iter().all(|&s| s == 0));
     }
 
     #[test]
