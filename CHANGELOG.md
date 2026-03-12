@@ -8,6 +8,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [0.1.0] - 2026-03-12
 
 ### Added
+- release: published `opus-decoder v0.1.0` to crates.io.
+  https://crates.io/crates/opus-decoder
+- chore(release): clarified `fec` parameter doc as PLC placeholder for future
+  in-band FEC; corrected MSRV in README from 1.70 to 1.85; replaced "clean-room
+  port" with accurate "pure Rust port verified against libopus"; consolidated
+  dual CHANGELOG into single Keep-a-Changelog format at repo root.
+  Commit `440ee50`.
+- release: `cargo publish --dry-run` clean — 41 files, 598.4 KiB
+  (122.3 KiB compressed). Ready for `cargo publish`.
 - Final pre-publish release polish: clarified that `fec` is currently documented as a future in-band FEC placeholder and treated as PLC when `true`, corrected the README MSRV to Rust 1.85, updated the README implementation description, and consolidated the changelog into the repo root.
 - Public API cleanup for crates.io release: stabilized `OpusDecoder::{new, decode, decode_float, reset}` and `OpusError`, sealed internal `Decoder`/`Error` internals behind `pub(crate)`, added module-level docs for `lib.rs`, `celt/mod.rs`, `silk/mod.rs`, and `entropy.rs`, and removed remaining `OPUS_TRACE_*` / `eprintln!` instrumentation from `src/`.
 - Packet loss concealment support across the public API: `OpusDecoder::{decode, decode_float}` accept empty packets for PLC, decoder state tracks `loss_count` and `last_packet_duration`, CELT PLC reuses prior energy/history with fade-out and noise injection, and an ignored PLC smoke test was added.
