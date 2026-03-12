@@ -6,8 +6,10 @@ Cargo.lock
 /crates/opus-decoder/target/
 
 # Test vector data (large, downloaded separately via cargo xtask fetch-vectors)
+testdata/opus_testvectors/
 testdata/opus_testvectors/*.bit
 testdata/opus_testvectors/*.dec
+testdata/.tmp_*
 
 # macOS
 .DS_Store
