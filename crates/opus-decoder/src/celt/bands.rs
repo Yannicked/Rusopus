@@ -722,11 +722,11 @@ fn quant_band_stereo_decode(
         };
         decode_sign(&mut x[0]);
         decode_sign(&mut y[0]);
-        if let Some(dst) = mid_history_out.as_deref_mut()
-            && !dst.is_empty()
-        {
-            // Match libopus quant_band_n1(): preserve X[0] as lowband history.
-            dst[0] = x[0];
+        if let Some(dst) = mid_history_out.as_deref_mut() {
+            if !dst.is_empty() {
+                // Match libopus quant_band_n1(): preserve X[0] as lowband history.
+                dst[0] = x[0];
+            }
         }
         return 1;
     }

@@ -44,7 +44,10 @@ pub fn load_vector_spec(vector_name: &str) -> io::Result<VectorSpec> {
 
         let mut fields = line.split_whitespace();
         let name = fields.next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "missing vector name in manifest")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing vector name in manifest",
+            )
         })?;
         if name != vector_name {
             continue;
@@ -176,8 +179,7 @@ fn encode_self_delimited_size(len: usize) -> Vec<u8> {
         vec![
             u8::try_from(252 + (remainder & 0x03))
                 .expect("self-delimited prefix first byte fits in u8"),
-            u8::try_from(remainder >> 2)
-                .expect("self-delimited prefix second byte fits in u8"),
+            u8::try_from(remainder >> 2).expect("self-delimited prefix second byte fits in u8"),
         ]
     }
 }

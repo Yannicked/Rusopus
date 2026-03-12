@@ -31,6 +31,10 @@ pub use multistream::OpusMultistreamDecoder;
 
 static TRACE_DECODE_PACKET_IDX: AtomicUsize = AtomicUsize::new(0);
 
+/// High-level single-stream Opus decoder.
+///
+/// This wrapper exposes the stable public API for packet-to-PCM decoding while
+/// keeping CELT and SILK state management internal to the crate.
 pub struct OpusDecoder {
     decoder: Decoder,
     float_scratch: Vec<i16>,
@@ -41,9 +45,18 @@ pub struct OpusDecoder {
 impl OpusDecoder {
     /// Create a new decoder.
     ///
-    /// Parameters: `sample_rate` must be 8000, 12000, 16000, 24000, or 48000,
-    /// and `channels` must be 1 or 2.
-    /// Returns: initialized decoder state on success.
+    /// `sample_rate` must be `8000`, `12000`, `16000`, `24000`, or `48000`,
+    /// and `channels` must be `1` or `2`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use opus_decoder::OpusDecoder;
+    ///
+    /// let decoder = OpusDecoder::new(48_000, 2)?;
+    /// # let _ = decoder;
+    /// # Ok::<(), opus_decoder::OpusError>(())
+    /// ```
     pub fn new(sample_rate: u32, channels: usize) -> Result<Self, OpusError> {
         let channels =
             u8::try_from(channels).map_err(|_| OpusError::InvalidArgument("channels"))?;
@@ -68,8 +81,21 @@ impl OpusDecoder {
 
     /// Decode a packet into 16-bit PCM samples (interleaved if stereo).
     ///
-    /// Parameters: Opus `packet`, writable interleaved PCM `pcm`, and FEC flag `fec`.
-    /// Returns: number of decoded samples per channel.
+    /// Empty `packet` input triggers packet loss concealment using the previous
+    /// decoder state. Returns the number of decoded samples per channel.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use opus_decoder::OpusDecoder;
+    ///
+    /// let mut decoder = OpusDecoder::new(48_000, 2)?;
+    /// let packet = std::fs::read("frame.opus")?;
+    /// let mut pcm = vec![0i16; 960 * 2];
+    /// let samples = decoder.decode(&packet, &mut pcm, false)?;
+    /// # let _ = samples;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn decode(
         &mut self,
         packet: &[u8],
@@ -89,8 +115,21 @@ impl OpusDecoder {
 
     /// Decode a packet into f32 PCM samples (interleaved if stereo).
     ///
-    /// Parameters: Opus `packet`, writable interleaved PCM `pcm`, and FEC flag `fec`.
-    /// Returns: number of decoded samples per channel.
+    /// Empty `packet` input triggers packet loss concealment using the previous
+    /// decoder state. Returns the number of decoded samples per channel.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use opus_decoder::OpusDecoder;
+    ///
+    /// let mut decoder = OpusDecoder::new(48_000, 1)?;
+    /// let packet = std::fs::read("frame.opus")?;
+    /// let mut pcm = vec![0.0f32; 960];
+    /// let samples = decoder.decode_float(&packet, &mut pcm, false)?;
+    /// # let _ = samples;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn decode_float(
         &mut self,
         packet: &[u8],
@@ -144,14 +183,19 @@ impl OpusDecoder {
     }
 }
 
+/// Errors returned by the public Opus decoding API.
 #[derive(Debug, thiserror::Error)]
 pub enum OpusError {
+    /// The provided Opus packet is malformed or internally inconsistent.
     #[error("invalid packet")]
     InvalidPacket,
+    /// The decoder hit an internal unsupported or unexpected state.
     #[error("internal error")]
     InternalError,
+    /// The output PCM buffer is too small for the decoded frame.
     #[error("buffer too small")]
     BufferTooSmall,
+    /// One of the public API arguments is invalid.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
 }

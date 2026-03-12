@@ -17,11 +17,9 @@ fn multistream_stereo_call_recording() {
     let samples = decoder.decode(&packet, &mut pcm, false).unwrap();
 
     assert!(samples > 0);
-    assert!(
-        pcm[..samples * 2]
-            .chunks_exact(2)
-            .any(|frame| frame[0] != frame[1])
-    );
+    assert!(pcm[..samples * 2]
+        .chunks_exact(2)
+        .any(|frame| frame[0] != frame[1]));
 }
 
 /// Verify that mapping value `255` silences the corresponding output channel.
@@ -38,7 +36,9 @@ fn multistream_silence_channel() {
     let samples = decoder.decode(packet, &mut pcm, false).unwrap();
 
     assert!(samples > 0);
-    assert!(pcm[..samples * 2].chunks_exact(2).all(|frame| frame[1] == 0));
+    assert!(pcm[..samples * 2]
+        .chunks_exact(2)
+        .all(|frame| frame[1] == 0));
 }
 
 /// Reject invalid multistream topology arguments.
@@ -51,4 +51,3 @@ fn multistream_invalid_args() {
     assert!(OpusMultistreamDecoder::new(48_000, 2, 1, 0, &[0]).is_err());
     assert!(OpusMultistreamDecoder::new(48_000, 2, 1, 0, &[0, 2]).is_err());
 }
-

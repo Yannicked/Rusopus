@@ -23,9 +23,11 @@ fn celt_output_rates_decode_successfully() {
         let mut decoder = OpusDecoder::new(fs, 1).unwrap();
         let mut pcm = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
         for (packet_idx, packet) in sample_packets.iter().enumerate() {
-            let written = decoder.decode(packet, &mut pcm, false).unwrap_or_else(|err| {
-                panic!("decode failed for fs={fs} packet={packet_idx}: {err:?}")
-            });
+            let written = decoder
+                .decode(packet, &mut pcm, false)
+                .unwrap_or_else(|err| {
+                    panic!("decode failed for fs={fs} packet={packet_idx}: {err:?}")
+                });
             assert_eq!(
                 written * 48_000usize,
                 reference_sizes[packet_idx] * fs as usize,
@@ -50,7 +52,10 @@ fn celt_plc_supports_24k_output() {
     }
 
     let written = decoder.decode(&[], &mut pcm, false).unwrap();
-    assert!(written > 0, "CELT PLC should reuse the previous frame duration");
+    assert!(
+        written > 0,
+        "CELT PLC should reuse the previous frame duration"
+    );
     assert!(
         pcm[..written].iter().any(|&sample| sample != 0),
         "CELT PLC at 24 kHz should produce concealed output"

@@ -3,7 +3,7 @@ mod common;
 
 use common::{build_multistream_packet, load_packets, load_vector_spec};
 use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
 use opus_decoder::{Decoder, OpusDecoder, OpusMultistreamDecoder};
 use std::time::Duration;
@@ -26,7 +26,8 @@ fn bench_per_mode(c: &mut Criterion) {
     for (bench_name, vector_name) in cases {
         let spec = load_vector_spec(vector_name).expect("failed to load vector spec");
         let packets = load_packets(vector_name).expect("failed to load vector packets");
-        let total_samples = compute_total_interleaved_samples(spec.sample_rate, spec.channels, &packets);
+        let total_samples =
+            compute_total_interleaved_samples(spec.sample_rate, spec.channels, &packets);
 
         group.throughput(Throughput::Elements(total_samples as u64));
         group.bench_function(bench_name, |b| {
@@ -193,7 +194,10 @@ fn decode_all_two_decoders(packets: &[Vec<u8>]) -> usize {
         let right_written = right
             .decode(packet, &mut right_pcm, false)
             .expect("right decode failed");
-        assert_eq!(left_written, right_written, "paired mono packets must match");
+        assert_eq!(
+            left_written, right_written,
+            "paired mono packets must match"
+        );
 
         for sample_idx in 0..left_written {
             stereo_pcm[2 * sample_idx] = left_pcm[sample_idx];

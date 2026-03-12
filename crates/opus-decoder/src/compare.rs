@@ -55,15 +55,15 @@ pub fn compare_quality(
         return Err(format!("invalid rate_hz: {rate_hz}"));
     }
 
-    if !reference_pcm.len().is_multiple_of(reference_channels) {
+    if reference_pcm.len() % reference_channels != 0 {
         return Err("reference pcm is not properly interleaved".to_string());
     }
-    if !candidate_pcm.len().is_multiple_of(candidate_channels) {
+    if candidate_pcm.len() % candidate_channels != 0 {
         return Err("candidate pcm is not properly interleaved".to_string());
     }
 
     let downsample = (48_000u32 / rate_hz) as usize;
-    if downsample == 0 || !48_000u32.is_multiple_of(rate_hz) {
+    if downsample == 0 || 48_000u32 % rate_hz != 0 {
         return Err("rate_hz must divide 48000".to_string());
     }
 

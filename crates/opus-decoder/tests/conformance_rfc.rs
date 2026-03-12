@@ -48,10 +48,10 @@ fn rfc_conformance_vectors() {
     let mut ran_any = false;
 
     for v in vectors {
-        if let Some(f) = filter.as_deref()
-            && !v.name.contains(f)
-        {
-            continue;
+        if let Some(f) = filter.as_deref() {
+            if !v.name.contains(f) {
+                continue;
+            }
         }
         ran_any = true;
         run_vector(&vectors_dir, &v).unwrap_or_else(|e| {
@@ -100,11 +100,9 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut pcm_f32, false)
             .expect("normal CELT f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(
-            pcm_f32[..samples_f32]
-                .iter()
-                .all(|sample| sample.is_finite())
-        );
+        assert!(pcm_f32[..samples_f32]
+            .iter()
+            .all(|sample| sample.is_finite()));
         last_good_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
         eprintln!("celt pre-loss frame {frame_idx} rms={last_good_rms:.6}");
     }
@@ -118,11 +116,9 @@ fn plc_smoke_test() {
             .expect("CELT PLC f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
         assert!(samples_f32 > 0, "PLC should reuse the last packet duration");
-        assert!(
-            pcm_f32[..samples_f32]
-                .iter()
-                .all(|sample| sample.is_finite())
-        );
+        assert!(pcm_f32[..samples_f32]
+            .iter()
+            .all(|sample| sample.is_finite()));
         last_loss_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
         eprintln!("celt loss frame {loss_idx} rms={last_loss_rms:.6}");
     }
@@ -140,11 +136,9 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut pcm_f32, false)
             .expect("post-loss CELT f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(
-            pcm_f32[..samples_f32]
-                .iter()
-                .all(|sample| sample.is_finite())
-        );
+        assert!(pcm_f32[..samples_f32]
+            .iter()
+            .all(|sample| sample.is_finite()));
         let rms = frame_rms_f32(&pcm_f32[..samples_f32]);
         eprintln!("celt post-loss frame {frame_idx} rms={rms:.6}");
     }
@@ -176,11 +170,9 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut silk_pcm_f32, false)
             .expect("normal SILK f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(
-            silk_pcm_f32[..samples_f32 * 2]
-                .iter()
-                .all(|sample| sample.is_finite())
-        );
+        assert!(silk_pcm_f32[..samples_f32 * 2]
+            .iter()
+            .all(|sample| sample.is_finite()));
         let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
         eprintln!("silk pre-loss frame {frame_idx} rms={rms:.6}");
     }
@@ -197,11 +189,9 @@ fn plc_smoke_test() {
             samples_f32 > 0,
             "SILK PLC should reuse the last packet duration"
         );
-        assert!(
-            silk_pcm_f32[..samples_f32 * 2]
-                .iter()
-                .all(|sample| sample.is_finite())
-        );
+        assert!(silk_pcm_f32[..samples_f32 * 2]
+            .iter()
+            .all(|sample| sample.is_finite()));
         let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
         assert!(rms > 0.0, "SILK PLC should not output silence");
         silk_loss_rms.push(rms);
@@ -223,11 +213,9 @@ fn plc_smoke_test() {
             .decode_float(packet, &mut silk_pcm_f32, false)
             .expect("post-loss SILK f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
-        assert!(
-            silk_pcm_f32[..samples_f32 * 2]
-                .iter()
-                .all(|sample| sample.is_finite())
-        );
+        assert!(silk_pcm_f32[..samples_f32 * 2]
+            .iter()
+            .all(|sample| sample.is_finite()));
         let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
         eprintln!("silk post-loss frame {frame_idx} rms={rms:.6}");
     }
@@ -372,26 +360,25 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                         out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]
                     );
                 }
-                if let Some(target_pcm_idx) = trace_pcm_packet_idx
-                    && packet_idx == target_pcm_idx
-                    && written >= 8
-                {
-                    eprintln!(
-                        "[RUST] pkt{} pcm[0..8]: {} {} {} {} {} {} {} {}",
-                        target_pcm_idx,
-                        out[0],
-                        out[1],
-                        out[2],
-                        out[3],
-                        out[4],
-                        out[5],
-                        out[6],
-                        out[7]
-                    );
-                    eprintln!(
-                        "[RUST] pkt{} samples_per_channel={}",
-                        target_pcm_idx, samples_per_channel
-                    );
+                if let Some(target_pcm_idx) = trace_pcm_packet_idx {
+                    if packet_idx == target_pcm_idx && written >= 8 {
+                        eprintln!(
+                            "[RUST] pkt{} pcm[0..8]: {} {} {} {} {} {} {} {}",
+                            target_pcm_idx,
+                            out[0],
+                            out[1],
+                            out[2],
+                            out[3],
+                            out[4],
+                            out[5],
+                            out[6],
+                            out[7]
+                        );
+                        eprintln!(
+                            "[RUST] pkt{} samples_per_channel={}",
+                            target_pcm_idx, samples_per_channel
+                        );
+                    }
                 }
                 if packet_idx == 1 && written >= 8 {
                     eprintln!(
@@ -451,14 +438,14 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                         out[3]
                     );
                 }
-                if let Some(target_idx) = trace_packet_idx
-                    && packet_idx == target_idx
-                {
-                    eprintln!(
-                        "[RUST] packet{} final_range expected=0x{:08x} got=0x{:08x}",
-                        target_idx, p.expected_final_range, got
-                    );
-                    return Ok(());
+                if let Some(target_idx) = trace_packet_idx {
+                    if packet_idx == target_idx {
+                        eprintln!(
+                            "[RUST] packet{} final_range expected=0x{:08x} got=0x{:08x}",
+                            target_idx, p.expected_final_range, got
+                        );
+                        return Ok(());
+                    }
                 }
             }
             Err(Error::NotImplemented) => {

@@ -32,6 +32,16 @@ impl OpusMultistreamDecoder {
     /// Parameters: `sample_rate`, total output `nb_channels`, `nb_streams`,
     /// `nb_coupled_streams`, and per-output-channel `mapping`.
     /// Returns: initialized multistream decoder on success.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use opus_decoder::OpusMultistreamDecoder;
+    ///
+    /// let decoder = OpusMultistreamDecoder::new(48_000, 2, 2, 0, &[0, 1])?;
+    /// # let _ = decoder;
+    /// # Ok::<(), opus_decoder::OpusError>(())
+    /// ```
     pub fn new(
         sample_rate: u32,
         nb_channels: usize,
@@ -64,7 +74,11 @@ impl OpusMultistreamDecoder {
 
         let mut decoders = Vec::with_capacity(nb_streams);
         for stream_idx in 0..nb_streams {
-            let channels = if stream_idx < nb_coupled_streams { 2 } else { 1 };
+            let channels = if stream_idx < nb_coupled_streams {
+                2
+            } else {
+                1
+            };
             decoders.push(OpusDecoder::new(sample_rate, channels)?);
         }
 
@@ -82,6 +96,19 @@ impl OpusMultistreamDecoder {
     ///
     /// Parameters: multistream `packet`, writable interleaved `pcm`, and `fec`.
     /// Returns: decoded samples per output channel.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use opus_decoder::OpusMultistreamDecoder;
+    ///
+    /// let mut decoder = OpusMultistreamDecoder::new(48_000, 2, 2, 0, &[0, 1])?;
+    /// let packet = std::fs::read("multistream-frame.opus")?;
+    /// let mut pcm = vec![0i16; 960 * 2];
+    /// let samples = decoder.decode(&packet, &mut pcm, false)?;
+    /// # let _ = samples;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn decode(
         &mut self,
         packet: &[u8],
@@ -138,6 +165,19 @@ impl OpusMultistreamDecoder {
     ///
     /// Parameters: multistream `packet`, writable interleaved `pcm`, and `fec`.
     /// Returns: decoded samples per output channel.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use opus_decoder::OpusMultistreamDecoder;
+    ///
+    /// let mut decoder = OpusMultistreamDecoder::new(48_000, 2, 2, 0, &[0, 1])?;
+    /// let packet = std::fs::read("multistream-frame.opus")?;
+    /// let mut pcm = vec![0.0f32; 960 * 2];
+    /// let samples = decoder.decode_float(&packet, &mut pcm, false)?;
+    /// # let _ = samples;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn decode_float(
         &mut self,
         packet: &[u8],
@@ -251,10 +291,7 @@ impl OpusMultistreamDecoder {
         if slot < coupled_slots {
             (slot / 2, slot % 2)
         } else {
-            (
-                self.nb_coupled_streams + (slot - coupled_slots),
-                0,
-            )
+            (self.nb_coupled_streams + (slot - coupled_slots), 0)
         }
     }
 }

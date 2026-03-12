@@ -13,8 +13,8 @@
     clippy::unnecessary_cast
 )]
 
-use crate::Error;
 use crate::entropy::EcDec;
+use crate::Error;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod bands;
@@ -181,7 +181,7 @@ impl CeltDecoder {
     /// Returns: per-channel sample count at the configured public output rate.
     fn output_frame_size(&self, frame_size_48k: usize) -> Result<usize, Error> {
         let downsample = self.downsample_factor()?;
-        if !frame_size_48k.is_multiple_of(downsample) {
+        if frame_size_48k % downsample != 0 {
             return Err(Error::NotImplemented);
         }
         Ok(frame_size_48k / downsample)

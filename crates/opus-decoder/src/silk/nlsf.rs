@@ -1,6 +1,6 @@
 //! SILK NLSF reconstruction helpers.
 
-use super::tables::{self, MAX_LPC_ORDER, NlsfCodebook};
+use super::tables::{self, NlsfCodebook, MAX_LPC_ORDER};
 
 const MAX_LOOPS: usize = 20;
 const NLSF_QUANT_LEVEL_ADJ_Q10: i32 = 102;
