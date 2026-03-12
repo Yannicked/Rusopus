@@ -31,6 +31,9 @@
 - fix(celt): implement output rate decimation for CELT path (8/12/16/24 kHz);
   previously returned NotImplemented for fs_hz != 48000. Decimation via
   simple polyphase downsample consistent with libopus celt_decoder output path.
+- bench: Phase 8 – added `criterion` benchmarks for mode throughput, CELT output
+  rates, PLC overhead, and multistream wrapper overhead; saved
+  `rasopus_baseline` and recorded measured baseline numbers in `PROJECT_STATUS.md`.
 
 ## 2026-03-09
 
