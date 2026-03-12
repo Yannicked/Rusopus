@@ -90,6 +90,8 @@ impl OpusDecoder {
     ///
     /// Empty `packet` input triggers packet loss concealment using the previous
     /// decoder state. Returns the number of decoded samples per channel.
+    /// - `fec`: reserved for future in-band FEC support. Currently treated as
+    ///   packet loss concealment (PLC) when `true`. Pass `false` for normal decode.
     ///
     /// # Examples
     ///
@@ -124,6 +126,8 @@ impl OpusDecoder {
     ///
     /// Empty `packet` input triggers packet loss concealment using the previous
     /// decoder state. Returns the number of decoded samples per channel.
+    /// - `fec`: reserved for future in-band FEC support. Currently treated as
+    ///   packet loss concealment (PLC) when `true`. Pass `false` for normal decode.
     ///
     /// # Examples
     ///

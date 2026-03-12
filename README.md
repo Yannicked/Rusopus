@@ -172,7 +172,7 @@ done
 
 ## Minimum Supported Rust Version (MSRV)
 
-**Rust 1.70** — enforced in CI.
+**Rust 1.85** — enforced in CI.
 
 Uses: `std`, `thiserror`. No nightly features.
 
@@ -186,8 +186,8 @@ The following are intentionally **not** implemented in this crate:
 
 ## Implementation Notes
 
-This crate is a clean-room port of [libopus](https://opus-codec.org/) (BSD-3),
-ported function-by-function with RFC 8251 conformance as the primary constraint.
+This crate is a pure Rust port of libopus based on RFC 6716 and RFC 8251,
+implemented function-by-function and verified against the reference libopus implementation.
 The floating-point decode path is used throughout (matching libopus float semantics).
 
 Internal architecture:

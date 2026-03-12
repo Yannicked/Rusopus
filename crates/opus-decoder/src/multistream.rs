@@ -95,6 +95,9 @@ impl OpusMultistreamDecoder {
     /// Decode a multistream packet into interleaved i16 PCM.
     ///
     /// Parameters: multistream `packet`, writable interleaved `pcm`, and `fec`.
+    /// - `fec`: reserved for future in-band FEC support. Currently treated as
+    ///   packet loss concealment (PLC) when `true`. Pass `false` for normal decode.
+    ///
     /// Returns: decoded samples per output channel.
     ///
     /// # Examples
@@ -164,6 +167,9 @@ impl OpusMultistreamDecoder {
     /// Decode a multistream packet into interleaved f32 PCM.
     ///
     /// Parameters: multistream `packet`, writable interleaved `pcm`, and `fec`.
+    /// - `fec`: reserved for future in-band FEC support. Currently treated as
+    ///   packet loss concealment (PLC) when `true`. Pass `false` for normal decode.
+    ///
     /// Returns: decoded samples per output channel.
     ///
     /// # Examples

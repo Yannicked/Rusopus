@@ -1,70 +1,28 @@
 # Changelog
 
-## 2026-03-12
+All notable changes to `opus-decoder` are documented here.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
-- refactor(api): Phase 7 cleanup – removed all `OPUS_TRACE_*` / `eprintln!`
-  instrumentation from `crates/opus-decoder/src/`; stabilized public API
-  (`OpusDecoder::new`, `decode`, `decode_float`, `reset`, `OpusError` via
-  `thiserror`); added `//!` module-level doc comments to `lib.rs`, `celt/mod.rs`,
-  `silk/mod.rs`, `entropy.rs`; all mechanical clippy warnings resolved
-  (`-D warnings` clean). RFC conformance: 12/12 vectors still PASS.
-- feat(plc): CELT PLC (`CeltDecoder::decode_lost()`) reusing `prev_energy`,
-  `decode_mem`, overlap and deemphasis buffers; noise injection with per-loss
-  fade-out (~-6dB/frame, capped at 5). SILK/Hybrid loss path: safe silence/fade
-  fallback (TODO: replace with `silk_PLC_conceal()` pitch extrapolation in Phase 5b).
-  `OpusDecoder::{decode, decode_float}` handle `packet=[]` and `fec=true` as PLC;
-  `Decoder` tracks `loss_count`, `last_packet_duration`. Added `plc_smoke_test`
-  (ignored) on testvector07. Clippy clean, RFC conformance: 12/12 PASS.
-- feat(plc): Phase 5b – new `silk/plc.rs` with `SilkPlcState`, `plc_update()`
-  and `plc_conceal()`; pitch/LPC/output saved after each good SILK frame;
-  SilkOnly/Hybrid loss path replaced with real pitch-extrapolation PLC reusing
-  existing `resampler_state` (continuous state). Hybrid uses SILK PLC without
-  separate CELT highband PLC (acceptable for now). Reference read from
-  `/tmp/libopus-tv09/silk/` (local mirror). Clippy clean, plc_smoke_test PASS,
-  RFC conformance: 12/12 PASS.
-- feat(multistream): Phase 6 – `OpusMultistreamDecoder` in `src/multistream.rs`
-  with `new`, `decode`, `decode_float`, `reset`; mapping validation (255=silence,
-  out-of-range → InvalidArgument); `split_multistream_packet()` helper with
-  self-delimiting length prefix per libopus `opus_multistream_decode_native()`.
-  Exported via `lib.rs`. Tests: stereo call-recording simulation, silence channel
-  mapping, invalid args. Clippy clean, RFC conformance: 12/12 PASS.
-- fix(celt): implement output rate decimation for CELT path (8/12/16/24 kHz);
-  previously returned NotImplemented for fs_hz != 48000. Decimation via
-  simple polyphase downsample consistent with libopus celt_decoder output path.
-- bench: Phase 8 – added `criterion` benchmarks for mode throughput, CELT output
-  rates, PLC overhead, and multistream wrapper overhead; saved
-  `rasopus_baseline` and recorded measured baseline numbers in `PROJECT_STATUS.md`.
+## [Unreleased]
 
-## 2026-03-09
+## [0.1.0] - 2026-03-12
 
-- feat(silk): fixed mono Hybrid resampler carry by sourcing the 48 kHz handoff from `stereo_state.s_mid` instead of the stale mono history buffer; `testvector10` now passes (was `err=4.58`).
-- milestone(rfc8251): all `12/12` RFC 8251 conformance vectors now pass.
-- fix(hybrid): restored Hybrid libopus parity by skipping SILK redundancy parsing in Hybrid, restoring the CELT `start == 0` postfilter guard, and correcting SWB Hybrid CELT end band / `effEnd` handling.
-- fix(silk): matched CELT redundancy decode end band to the packet bandwidth in SilkOnly transitions.
-- milestone(opus-decoder): `testvector05` and `testvector06` now pass RFC conformance; current sweep status is `8/12` passing vectors.
+### Added
+- Final pre-publish release polish: clarified that `fec` is currently documented as a future in-band FEC placeholder and treated as PLC when `true`, corrected the README MSRV to Rust 1.85, updated the README implementation description, and consolidated the changelog into the repo root.
+- Public API cleanup for crates.io release: stabilized `OpusDecoder::{new, decode, decode_float, reset}` and `OpusError`, sealed internal `Decoder`/`Error` internals behind `pub(crate)`, added module-level docs for `lib.rs`, `celt/mod.rs`, `silk/mod.rs`, and `entropy.rs`, and removed remaining `OPUS_TRACE_*` / `eprintln!` instrumentation from `src/`.
+- Packet loss concealment support across the public API: `OpusDecoder::{decode, decode_float}` accept empty packets for PLC, decoder state tracks `loss_count` and `last_packet_duration`, CELT PLC reuses prior energy/history with fade-out and noise injection, and an ignored PLC smoke test was added.
+- SILK pitch-extrapolation PLC in `silk/plc.rs` with `SilkPlcState`, `plc_update()`, and `plc_conceal()`, saving pitch/LPC/output history after good frames and reusing the existing resampler state on the loss path.
+- `OpusMultistreamDecoder` with `new`, `decode`, `decode_float`, and `reset`, including RFC 7845-style channel mapping, self-delimited packet splitting, silence mapping via `255`, and coverage for call-recording, silence-channel, and invalid-argument cases.
+- Criterion benchmark coverage for per-mode throughput, CELT output sample rates, PLC overhead, and multistream wrapper overhead, with baseline results recorded in `PROJECT_STATUS.md`.
+- Full CELT output-rate decimation for 8/12/16/24 kHz output instead of returning `NotImplemented`, keeping behavior aligned with the libopus decoder output path.
+- Hybrid and transition parity fixes needed for full RFC 8251 coverage: corrected mono Hybrid resampler carry, restored Hybrid libopus parity around redundancy/postfilter handling and SWB `effEnd`, and matched CELT redundancy end-band selection to packet bandwidth in SilkOnly transitions.
+- Decoder mode-transition state handling for SILK/CELT carry-over, including redundancy tracking and transition fade/reset flow.
+- SILK Phase 3c excitation reconstruction and LPC synthesis with libopus-matching subframe gains, pitch/LTP handling, Q14 LPC synthesis, and zero-padding of internal-rate PCM to API frame size.
+- SILK Phase 3a entropy-path support for SILK-only packets, including VAD/LBRR parsing, stereo signaling, main/LBRR indices and pulses, correct `final_range` tracking for `testvector02`, and corrected RFC vector manifest channel counts.
+- Early CELT conformance and debug groundwork: config-based `OpusMode` routing, exposed `final_range()` plus soft per-packet checks, recursive CELT `quant_partition` split support, and bit-exact MDCT backward-path verification.
+- CELT synthesis/band fixes for mono and stereo-coded packets: unified `decode_mem`, libopus-style overlap/history layout, corrected stereo collapse-mask TF mapping and stereo merge semantics, and fixed lowband history propagation for `N=1`.
+- CELT packet/band quantization fixes for the initial mono decode milestone: code-1 packet parsing rejects odd payload lengths, TOC bandwidth-dependent band ends are correct, lowband fold wrap-around is fixed, `tf_change` block scaling and `itheta` floor quantization match libopus, and `LM=-1` handling in `bits2pulses` / `pulses2bits` is implemented.
+- Project planning/docs baseline: `OPUS_PORT_PLAN.md` was rebuilt to match libopus decoder requirements, including corrected CELT/SILK sample-rate architecture, expanded phased plan details, a decoder state model, RFC 8251 errata notes, and Rust module mapping.
+- RFC 8251 conformance milestones: CELT mono `testvector07` reached bit-exact `final_range` parity and `98.1%` `opus_compare` quality, `testvector05` and `testvector06` brought the sweep to `8/12`, and the decoder ultimately reached `12/12` passing RFC 8251 vectors.
 
-## 2026-03-08
-
-- feat(opus-decoder): ported decoder mode transition state handling for SILK/CELT carry-over, including redundancy state tracking and transition fade/reset flow.
-
-## 2026-03-05
-
-- feat(silk): Phase 3c excitation reconstruction + LPC synthesis complete; subframe gains, pitch/LTP, and Q14 LPC synthesis now match libopus on `testvector02` pkt0, with internal-rate PCM zero-padded to API frame size.
-- feat(silk): completed Phase 3a entropy path for SILK-only packets: VAD/LBRR parsing, stereo signaling, main/LBRR indices+pulses consumption, `final_range` match for all `testvector02` packets, and corrected RFC vector manifest channel counts.
-- checkpoint(pre-silk): removed decoder debug instrumentation in `opus-decoder` (`eprintln`, `OPUS_TRACE_*`, `OPUS_DISABLE_*`); kept only `OPUS_TRACE_PACKET_MAX_DELTA` in `conformance_rfc`.
-- chore(lint): ran `cargo clippy -p opus-decoder --all-targets`; removed dead transient debug API, removed unused `CeltMode` metadata fields (`fs`, `eff_ebands`, `max_lm`, `nb_short_mdcts`), and removed unused `Complex32` import in MDCT path.
-
-## 2026-03-04
-
-- milestone: CELT mono decode passes RFC 8251 conformance (`testvector07`): `4186/4186` `final_range` bit-exact, `opus_compare` quality `98.1%` (`err=0.004610`), mono and stereo-coded packets decode correctly in mono output mode.
-- feat(celt): unified decode_mem buffer, mono synthesis bit-exact. Restructured CELT synthesis to use single contiguous `decode_mem[2048+120]` matching libopus. Overlap, comb filter history, and IMDCT output share one buffer. testvector07 mono section (pkt 0–2127): max_delta=1 (float rounding only). Remaining error is entirely in stereo-coded section (pkt 2128+).
-- fix(celt): aligned stereo collapse-mask TF mapping and stereo merge with libopus (`stereo_merge` side scaling semantics). Also fixed stereo N=1 lowband history propagation. `testvector07` vs live C: no `DELTA pkt` entries above threshold in conformance trace.
-
-## 2026-02-26
-
-- Completed mono CELT decode milestone: fixed TOC bandwidth-dependent band end, lowband fold wrap-around, `tf_change` block scaling in `quant_partition`, `itheta` floor quantization, and `LM=-1` handling in `bits2pulses`/`pulses2bits`.
-- `testvector07`: `2128/4186` packets match (`100%` of mono-coded packets); first stereo-coded packet is `pkt2128`.
-
-## 2026-02-22
-
-- Rebuilt `OPUS_PORT_PLAN.md` to match libopus decoder requirements: fixed CELT/SILK sample-rate architecture, expanded Phases 2-5 (including SILK 3a-3e), added Decoder State Model, added `final_range` conformance gate, added Rust module mapping, added RFC 8251 errata note, and updated Next step.
+[0.1.0]: https://github.com/tadeuszwojcik/rasopus/releases/tag/v0.1.0
