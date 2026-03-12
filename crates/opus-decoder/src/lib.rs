@@ -293,7 +293,7 @@ impl Decoder {
 
         out[..needed].fill(0);
         match self.prev_mode {
-            Some(OpusMode::CeltOnly) if self.fs_hz == 48_000 => {
+            Some(OpusMode::CeltOnly) => {
                 let concealed = self
                     .celt
                     .decode_lost(samples_per_channel, self.channels as usize);

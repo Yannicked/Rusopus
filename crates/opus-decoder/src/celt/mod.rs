@@ -160,6 +160,60 @@ impl CeltDecoder {
         self.loss_count = 0;
     }
 
+    /// Return the CELT output decimation factor for the configured sample rate.
+    ///
+    /// Params: none.
+    /// Returns: integer 48 kHz downsample factor for the public output rate.
+    fn downsample_factor(&self) -> Result<usize, Error> {
+        match self.fs_hz {
+            48_000 => Ok(1),
+            24_000 => Ok(2),
+            16_000 => Ok(3),
+            12_000 => Ok(4),
+            8_000 => Ok(6),
+            _ => Err(Error::NotImplemented),
+        }
+    }
+
+    /// Convert a 48 kHz CELT frame size to output samples per channel.
+    ///
+    /// Params: internal `frame_size_48k`.
+    /// Returns: per-channel sample count at the configured public output rate.
+    fn output_frame_size(&self, frame_size_48k: usize) -> Result<usize, Error> {
+        let downsample = self.downsample_factor()?;
+        if !frame_size_48k.is_multiple_of(downsample) {
+            return Err(Error::NotImplemented);
+        }
+        Ok(frame_size_48k / downsample)
+    }
+
+    /// Write one deemphasized CELT channel into the interleaved i16 output buffer.
+    ///
+    /// Params: mutable interleaved `out`, per-channel synthesized `ch_synth`,
+    /// channel index `ch`, and additive flag `accum`.
+    /// Returns: `Ok(())` on success or `Error::NotImplemented` for unsupported
+    /// output rates.
+    fn write_output_channel_i16(
+        &self,
+        out: &mut [i16],
+        ch_synth: &[f32],
+        ch: usize,
+        accum: bool,
+    ) -> Result<(), Error> {
+        let downsample = self.downsample_factor()?;
+        let output_samples = self.output_frame_size(ch_synth.len())?;
+        for i in 0..output_samples {
+            let sample = Self::float_to_i16(ch_synth[i * downsample]);
+            let out_idx = i * self.channels as usize + ch;
+            out[out_idx] = if accum {
+                out[out_idx].saturating_add(sample)
+            } else {
+                sample
+            };
+        }
+        Ok(())
+    }
+
     /// Derive the highest active CELT band from saved energy history.
     ///
     /// Params: active output `channels`.
@@ -182,9 +236,16 @@ impl CeltDecoder {
     /// Params: per-channel `frame_size` and output `channels`.
     /// Returns: interleaved concealed floating PCM.
     pub fn decode_lost(&mut self, frame_size: usize, channels: usize) -> Vec<f32> {
+        let downsample = match self.downsample_factor() {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        };
         let active_channels = channels.clamp(1, self.channels as usize).min(2);
         let mut pcm = vec![0.0f32; frame_size * active_channels];
-        let lm = match frame_size {
+        let Some(frame_size_48k) = frame_size.checked_mul(downsample) else {
+            return pcm;
+        };
+        let lm = match frame_size_48k {
             120 => 0,
             240 => 1,
             480 => 2,
@@ -219,7 +280,7 @@ impl CeltDecoder {
             right_energy[band] = LOG_ENERGY_FLOOR_DB;
         }
 
-        let mut mdct_left = vec![0.0f32; frame_size];
+        let mut mdct_left = vec![0.0f32; frame_size_48k];
         for band in 0..end {
             let start = (self.mode.e_bands[band] as usize) << lm;
             let band_len =
@@ -230,7 +291,7 @@ impl CeltDecoder {
             }
             vq::renormalise_vector(&mut mdct_left[start..start + band_len], 1.0);
         }
-        let mut denorm_left = vec![0.0f32; frame_size];
+        let mut denorm_left = vec![0.0f32; frame_size_48k];
         bands::denormalise_bands(
             self.mode,
             &mdct_left,
@@ -243,7 +304,7 @@ impl CeltDecoder {
         );
         if Self::synthesise_channel_to_mem(
             &denorm_left,
-            frame_size,
+            frame_size_48k,
             lm,
             false,
             self.mode.window,
@@ -260,7 +321,7 @@ impl CeltDecoder {
         }
 
         if active_channels == 2 {
-            let mut mdct_right = vec![0.0f32; frame_size];
+            let mut mdct_right = vec![0.0f32; frame_size_48k];
             for band in 0..end {
                 let start = (self.mode.e_bands[band] as usize) << lm;
                 let band_len =
@@ -271,7 +332,7 @@ impl CeltDecoder {
                 }
                 vq::renormalise_vector(&mut mdct_right[start..start + band_len], 1.0);
             }
-            let mut denorm_right = vec![0.0f32; frame_size];
+            let mut denorm_right = vec![0.0f32; frame_size_48k];
             bands::denormalise_bands(
                 self.mode,
                 &mdct_right,
@@ -284,7 +345,7 @@ impl CeltDecoder {
             );
             if Self::synthesise_channel_to_mem(
                 &denorm_right,
-                frame_size,
+                frame_size_48k,
                 lm,
                 false,
                 self.mode.window,
@@ -320,17 +381,17 @@ impl CeltDecoder {
             self.prev_energy[nb_ebands..2 * nb_ebands].copy_from_slice(&left_energy);
         }
 
-        let out_start = Self::out_start(frame_size);
-        let mut left = self.decode_mem[out_start..out_start + frame_size].to_vec();
+        let out_start = Self::out_start(frame_size_48k);
+        let mut left = self.decode_mem[out_start..out_start + frame_size_48k].to_vec();
         self.apply_deemph(0, &mut left);
         for i in 0..frame_size {
-            pcm[i * active_channels] = left[i];
+            pcm[i * active_channels] = left[i * downsample];
         }
         if active_channels == 2 {
-            let mut right = self.decode_mem_right[out_start..out_start + frame_size].to_vec();
+            let mut right = self.decode_mem_right[out_start..out_start + frame_size_48k].to_vec();
             self.apply_deemph(1, &mut right);
             for i in 0..frame_size {
-                pcm[i * 2 + 1] = right[i];
+                pcm[i * 2 + 1] = right[i * downsample];
             }
         }
 
@@ -697,16 +758,14 @@ impl CeltDecoder {
         let frame_call_idx = TRACE_PACKET_CALL_IDX.fetch_add(1, Ordering::SeqCst);
         let _ = parent_packet_idx;
         let packet_idx = usize::MAX;
-        if self.fs_hz != 48_000 {
-            return Err(Error::NotImplemented);
-        }
+        let output_samples = self.output_frame_size(frame_size_48k)?;
         if !matches!(self.channels, 1 | 2) {
             return Err(Error::NotImplemented);
         }
         if !matches!(frame_size_48k, 120 | 240 | 480 | 960) {
             return Err(Error::NotImplemented);
         }
-        let needed = frame_size_48k * self.channels as usize;
+        let needed = output_samples * self.channels as usize;
         if out.len() < needed {
             return Err(Error::OutputTooSmall {
                 needed,
@@ -3283,17 +3342,9 @@ impl CeltDecoder {
                 }
                 // #endregion
             }
-            for i in 0..frame_size_48k {
-                let sample = Self::float_to_i16(ch_synth[i]);
-                let out_idx = i * self.channels as usize + ch;
-                out[out_idx] = if accum {
-                    out[out_idx].saturating_add(sample)
-                } else {
-                    sample
-                };
-            }
+            self.write_output_channel_i16(out, &ch_synth, ch, accum)?;
             if packet_idx == 6 && ch == 0 {
-                let out_len = frame_size_48k * self.channels as usize;
+                let out_len = output_samples * self.channels as usize;
                 let out_slice = &out[..out_len];
                 let out_abs_sum: i64 = out_slice.iter().map(|&x| (x as i64).abs()).sum();
                 let data = format!(
@@ -3367,7 +3418,7 @@ impl CeltDecoder {
             rate::pulses2bits(self.mode, 0, lm as i32, 0),
         );
         Ok(CeltFrameDecode {
-            samples_per_channel: frame_size_48k,
+            samples_per_channel: output_samples,
             is_transient,
         })
     }

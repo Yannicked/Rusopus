@@ -28,6 +28,9 @@
   self-delimiting length prefix per libopus `opus_multistream_decode_native()`.
   Exported via `lib.rs`. Tests: stereo call-recording simulation, silence channel
   mapping, invalid args. Clippy clean, RFC conformance: 12/12 PASS.
+- fix(celt): implement output rate decimation for CELT path (8/12/16/24 kHz);
+  previously returned NotImplemented for fs_hz != 48000. Decimation via
+  simple polyphase downsample consistent with libopus celt_decoder output path.
 
 ## 2026-03-09
 
