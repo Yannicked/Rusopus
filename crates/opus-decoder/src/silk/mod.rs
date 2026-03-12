@@ -1242,6 +1242,7 @@ mod tests {
         assert_eq!(unpack_lbrr_symbol(0b101, 3), [true, false, true]);
     }
 
+    #[ignore = "requires OPUS_TESTVECTORS_DIR"]
     #[test]
     fn testvector02_pkt0_nlsf_to_lpc_matches_cref() {
         let packet = read_first_opus_demo_packet(&vectors_dir().join("testvector02.bit"));
@@ -1260,6 +1261,7 @@ mod tests {
         );
     }
 
+    #[ignore = "requires OPUS_TESTVECTORS_DIR"]
     #[test]
     fn testvector02_final_range_matches_reference_for_all_packets() {
         let packets = read_opus_demo_stream(&vectors_dir().join("testvector02.bit"));
