@@ -42,7 +42,7 @@ jobs:
         run: cargo test -p opus-decoder multistream --release -- --nocapture
 
   msrv:
-    name: MSRV (Rust 1.70)
+    name: MSRV (Rust 1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Download test vectors
-        run: cargo xtask fetch-vectors
+        run: cargo run --package xtask -- fetch-vectors
 
       - name: Run all 12 conformance vectors
         run: |
