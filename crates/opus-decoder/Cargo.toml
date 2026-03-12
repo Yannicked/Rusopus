@@ -7,3 +7,4 @@ rust-version = "1.93.0"
 description = "Pure Rust Opus decoder (no FFI) - decoder-first port of libopus"
 
 [dependencies]
+thiserror = "2.0.18"

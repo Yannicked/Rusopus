@@ -91,7 +91,7 @@ pub(super) fn decode_indices(
     decode_lbrr: bool,
     cond_coding: CondCoding,
 ) -> Result<DecodedSideInfo, Error> {
-    let mut ix = if decode_lbrr || frame_vad {
+    let ix = if decode_lbrr || frame_vad {
         dec.dec_icdf(&entropy_tables::TYPE_OFFSET_VAD_ICDF, 8) + 2
     } else {
         dec.dec_icdf(&entropy_tables::TYPE_OFFSET_NO_VAD_ICDF, 8)
@@ -176,8 +176,7 @@ pub(super) fn decode_indices(
 
     state.ec_prev_signal_type = signal_type;
     let seed = dec.dec_icdf(&entropy_tables::UNIFORM4_ICDF, 8) as i8;
-    ix = 0;
-    debug_trace!("silk lbrr side info consumed marker={}", ix);
+    debug_trace!("silk lbrr side info consumed marker={}", 0);
 
     Ok(DecodedSideInfo {
         signal_type,

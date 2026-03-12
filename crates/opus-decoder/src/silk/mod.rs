@@ -1,7 +1,8 @@
 //! SILK decoder scaffolding (Phase 3a).
 //!
-//! This module focuses on bitstream parsing and entropy consumption for SILK
-//! packet headers (VAD/LBRR/stereo signaling), with zeroed synthesis output.
+//! This module decodes SILK packet headers, side information, and synthesis
+//! state while keeping the implementation close to the reference decoder.
+#![allow(clippy::too_many_arguments, clippy::needless_borrow)]
 
 use crate::Error;
 use crate::entropy::EcDec;
@@ -119,14 +120,6 @@ impl SilkDecoder {
         self.final_range
     }
 
-    /// Return coded channel count seen in the previous SILK packet.
-    ///
-    /// Params: none.
-    /// Returns: previous packet coded channel count used for stereo transitions.
-    pub fn prev_packet_channels(&self) -> u8 {
-        self.prev_packet_channels
-    }
-
     /// Decode one SILK Opus frame payload.
     ///
     /// Params: `frame` payload bytes, `frame_samples_48k` frame duration in 48 kHz samples,
@@ -180,14 +173,6 @@ impl SilkDecoder {
             internal_frame_shape(frame_samples_48k, internal_fs_hz)?;
         let mut mono_resampler_history = self.stereo_state.s_mid;
         if packet_idx == 0 && (12..=15).contains(&config) {
-            // #region agent log H65
-            eprintln!(
-                "SILK_HYB entry: internal_fs={} nb_subfr={} internal_frames={} frame_length={}",
-                internal_fs_hz / 1000,
-                nb_subfr,
-                internal_frames,
-                frame_length
-            );
             append_silk_debug_log(
                 "silk-hybrid-entry",
                 "H65",
@@ -227,11 +212,6 @@ impl SilkDecoder {
                 self.core_state[ch] = decode_core::SilkChannelState::default();
                 self.first_frame_after_reset[ch] = true;
                 if (1116..=1120).contains(&packet_idx) {
-                    // #region agent log H112
-                    eprintln!(
-                        "TV12 pkt{} silk_fs_reset ch={} prev_fs={} new_fs={}",
-                        packet_idx, ch, prev_fs_khz, new_fs_khz
-                    );
                     append_silk_debug_log(
                         "tv12-silk-fs-reset",
                         "H112",
@@ -260,14 +240,6 @@ impl SilkDecoder {
                 self.stereo_state.s_side = [0; 2];
                 if let Some(left_resampler) = self.resampler_state[0].clone() {
                     self.resampler_state[1] = Some(left_resampler);
-                }
-                if matches!(packet_idx, 0 | 4 | 99 | 602) {
-                    // #region agent log H39
-                    eprintln!(
-                        "DBG H39 rust pkt{} mono_to_stereo copied_right_resampler",
-                        packet_idx
-                    );
-                    // #endregion
                 }
             }
         }
@@ -301,14 +273,6 @@ impl SilkDecoder {
         if packet_idx == 1118 {
             let ch = &self.core_state[0];
             let tail_start = ch.out_buf.len().saturating_sub(8);
-            // #region agent log H110
-            eprintln!(
-                "TV12 pkt1118 silk_entry: out_buf_last8={:?} sLPC_head4={:?} lag_prev={} prev_gain_index={}",
-                &ch.out_buf[tail_start..],
-                &ch.s_lpc_q14_buf[..4],
-                ch.lag_prev,
-                ch.last_gain_index
-            );
             append_silk_debug_log(
                 "tv12-pkt1118-silk-entry",
                 "H110",
@@ -389,40 +353,12 @@ impl SilkDecoder {
         let mut consumed_redundancy = false;
         let mut redundancy_bytes = 0usize;
         let mut celt_to_silk = false;
-        if packet_idx == 4 {
-            let tell = dec.tell();
-            let tell_frac = dec.tell_frac();
-            let redundancy_gate = tell + 17 <= (8 * frame.len() as i32);
-            let implied_redundancy_bytes = (frame.len() as i32 - ((tell + 7) >> 3)).max(0) as usize;
-            // #region agent log H48
-            eprintln!(
-                "DBG H48 rust pkt4 post_silk_ec tell={} tell_frac={} frame_bytes={} redundancy_gate={} implied_redundancy_bytes={}",
-                tell,
-                tell_frac,
-                frame.len(),
-                redundancy_gate,
-                implied_redundancy_bytes
-            );
-            // #endregion
-        }
         if !is_hybrid && dec.tell() + 17 <= (8 * frame.len() as i32) {
             celt_to_silk = dec.dec_bit_logp(1);
             redundancy_bytes = frame
                 .len()
                 .saturating_sub(((dec.tell() + 7).max(0) as usize) >> 3);
             consumed_redundancy = redundancy_bytes > 0;
-            if packet_idx == 4 {
-                // #region agent log H49
-                eprintln!(
-                    "DBG H49 rust pkt4 redundancy consumed={} celt_to_silk={} redundancy_bytes={} tell={} tell_frac={}",
-                    consumed_redundancy,
-                    celt_to_silk,
-                    redundancy_bytes,
-                    dec.tell(),
-                    dec.tell_frac()
-                );
-                // #endregion
-            }
         }
         if trace_pkt0 {
             trace_checkpoint(&dec, packet_idx, "after_main_decode");
@@ -430,14 +366,6 @@ impl SilkDecoder {
         if packet_idx == 1117 {
             let ch = &self.core_state[0];
             let tail_start = ch.out_buf.len().saturating_sub(8);
-            // #region agent log H111
-            eprintln!(
-                "TV12 post_pkt1117 out_buf_last8={:?} sLPC_head4={:?} lag_prev={} prev_gain_index={}",
-                &ch.out_buf[tail_start..],
-                &ch.s_lpc_q14_buf[..4],
-                ch.lag_prev,
-                ch.last_gain_index
-            );
             append_silk_debug_log(
                 "tv12-post-pkt1117-silk-state",
                 "H111",
@@ -453,27 +381,6 @@ impl SilkDecoder {
         }
         out[..needed].fill(0);
         let internal_samples_per_channel = internal_frames * frame_length;
-        if std::env::var("OPUS_TRACE_INTERNAL_LEN").ok().as_deref() == Some("1") {
-            eprintln!(
-                "R pkt{} internal_samples={} internal_frames={} frame_length={}",
-                packet_idx, internal_samples_per_channel, internal_frames, frame_length
-            );
-        }
-        if std::env::var("OPUS_DUMP_INTERNAL_PCM").ok().as_deref() == Some("1") {
-            let dump_path = "/tmp/rust_internal.pcm";
-            if packet_idx == 0 {
-                let _ = std::fs::remove_file(dump_path);
-            }
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dump_path)
-            {
-                for sample in &internal_pcm[0][..internal_samples_per_channel] {
-                    let _ = std::io::Write::write_all(&mut file, &sample.to_le_bytes());
-                }
-            }
-        }
         if self.fs_hz == 48_000 {
             for ch in 0..packet_channels as usize {
                 if let Some(resampler) = self.resampler_state[ch].as_mut() {
@@ -482,15 +389,6 @@ impl SilkDecoder {
                         let pcm_range = iframe_idx * frame_length..(iframe_idx + 1) * frame_length;
                         let frame_pcm = &internal_pcm[ch][pcm_range];
                         let expected = resampler.output_len(frame_length);
-                        if packet_idx == 4 {
-                            let (s_iir, s_fir, delay_buf) = resampler.debug_snapshot();
-                            // #region agent log H46
-                            eprintln!(
-                                "DBG H46 rust pkt4 ch{} iframe{} resampler_state s_iir={:?} s_fir={:?} delay={:?}",
-                                ch, iframe_idx, s_iir, s_fir, delay_buf
-                            );
-                            // #endregion
-                        }
                         let written = if packet_channels == 2 {
                             resampler.process(
                                 frame_pcm,
@@ -512,65 +410,10 @@ impl SilkDecoder {
                         written_total += written;
                     }
                     debug_assert_eq!(written_total, samples_per_channel);
-                    if matches!(packet_idx, 0 | 4 | 99 | 602) {
-                        // #region agent log H35
-                        eprintln!(
-                            "DBG H35 rust pkt{} ch{} resampled[0..8]={:?}",
-                            packet_idx,
-                            ch,
-                            &resampled_pcm[ch][..8.min(samples_per_channel)]
-                        );
-                        if packet_idx == 0 && samples_per_channel >= 280 {
-                            eprintln!(
-                                "DBG H40 rust pkt0 ch{} resampled[268..276]={:?}",
-                                ch,
-                                &resampled_pcm[ch][268..276]
-                            );
-                        }
-                        if packet_idx == 4 && samples_per_channel >= 860 {
-                            eprintln!(
-                                "DBG H44 rust pkt4 ch{} resampled[852..860]={:?}",
-                                ch,
-                                &resampled_pcm[ch][852..860]
-                            );
-                            eprintln!(
-                                "DBG H52 rust pkt4 ch{} resampled_last8={:?}",
-                                ch,
-                                &resampled_pcm[ch][samples_per_channel - 8..samples_per_channel]
-                            );
-                        }
-                        if matches!(packet_idx, 99) && samples_per_channel >= 8 {
-                            eprintln!(
-                                "DBG H58 rust pkt{} ch{} resampled_last8={:?}",
-                                packet_idx,
-                                ch,
-                                &resampled_pcm[ch][samples_per_channel - 8..samples_per_channel]
-                            );
-                        }
-                        // #endregion
-                    }
                 }
             }
         }
-        if std::env::var("OPUS_DUMP_RESAMPLED").is_ok() && samples_per_channel > 0 {
-            append_pcm_dump(
-                "/tmp/rust_tv02_resampled.raw",
-                &resampled_pcm[0][..samples_per_channel],
-            );
-        }
         if self.fs_hz == 48_000 {
-            if matches!(packet_idx, 0 | 4 | 602) {
-                // #region agent log H36
-                eprintln!(
-                    "DBG H36 rust pkt{} pre_interleave left[0..8]={:?} right[0..8]={:?} packet_channels={} out_channels={}",
-                    packet_idx,
-                    &resampled_pcm[0][..8.min(samples_per_channel)],
-                    &resampled_pcm[1][..8.min(samples_per_channel)],
-                    packet_channels,
-                    self.channels
-                );
-                // #endregion
-            }
             for n in 0..samples_per_channel {
                 let left = resampled_pcm[0][n];
                 match self.channels {
@@ -585,30 +428,6 @@ impl SilkDecoder {
                     }
                     _ => unreachable!(),
                 }
-            }
-            if packet_idx == 0 && self.channels == 2 {
-                eprintln!(
-                    "DBG H53 rust pkt0 final_output[0..8]={:?} L[0..4]={:?} R[0..4]={:?}",
-                    &out[..8.min(samples_per_channel * self.channels as usize)],
-                    &resampled_pcm[0][..4.min(samples_per_channel)],
-                    &resampled_pcm[1][..4.min(samples_per_channel)]
-                );
-                if samples_per_channel >= 272 {
-                    eprintln!(
-                        "DBG H54 rust pkt0 final_output[536..544]={:?} L[268..272]={:?} R[268..272]={:?}",
-                        &out[536..544],
-                        &resampled_pcm[0][268..272],
-                        &resampled_pcm[1][268..272]
-                    );
-                }
-            }
-            if packet_idx == 4 && self.channels == 2 {
-                eprintln!(
-                    "DBG H55 rust pkt4 final_output[0..8]={:?} L[0..4]={:?} R[0..4]={:?}",
-                    &out[..8.min(samples_per_channel * self.channels as usize)],
-                    &resampled_pcm[0][..4.min(samples_per_channel)],
-                    &resampled_pcm[1][..4.min(samples_per_channel)]
-                );
             }
         } else {
             for n in 0..internal_samples_per_channel.min(samples_per_channel) {
@@ -669,13 +488,6 @@ fn parse_header(
 
     for ch in 0..packet_channels {
         if packet_idx == 0 {
-            // #region agent log H69
-            eprintln!(
-                "SILK_HDR before_vad ch{} tell={} tell_frac={}",
-                ch,
-                dec.tell(),
-                dec.tell_frac()
-            );
             append_silk_debug_log(
                 "silk-header-before-vad",
                 "H69",
@@ -694,14 +506,6 @@ fn parse_header(
             parsed.channels[ch].vad_flags[i] = dec.dec_bit_logp(1);
         }
         if packet_idx == 0 {
-            // #region agent log H70
-            eprintln!(
-                "SILK_HDR after_vad ch{} tell={} tell_frac={} vad_flags={:?}",
-                ch,
-                dec.tell(),
-                dec.tell_frac(),
-                &parsed.channels[ch].vad_flags[..internal_frames]
-            );
             append_silk_debug_log(
                 "silk-header-after-vad",
                 "H70",
@@ -723,15 +527,6 @@ fn parse_header(
         let has_lbrr = dec.dec_bit_logp(1);
         parsed.channels[ch].lbrr_flags = unpack_lbrr_flags(dec, has_lbrr, internal_frames)?;
         if packet_idx == 0 {
-            // #region agent log H71
-            eprintln!(
-                "SILK_HDR after_lbrr_flag ch{} tell={} tell_frac={} has_lbrr={} lbrr_flags={:?}",
-                ch,
-                dec.tell(),
-                dec.tell_frac(),
-                has_lbrr,
-                &parsed.channels[ch].lbrr_flags[..internal_frames]
-            );
             append_silk_debug_log(
                 "silk-header-after-lbrr",
                 "H71",
@@ -830,20 +625,6 @@ fn consume_main_payload(
             pred_q13 = stereo::decode_stereo_pred(dec);
             decode_only_middle = !header.channels[1].vad_flags[i] && stereo::decode_mid_only(dec);
             mid_only_flags[i] = decode_only_middle;
-            if matches!(packet_idx, 0 | 4 | 99 | 602) {
-                // #region agent log H32
-                eprintln!(
-                    "DBG H32 rust pkt{} iframe{} stereo pred={:?} vad0={} vad1={} decode_only_middle={} prev_decode_only_middle={}",
-                    packet_idx,
-                    i,
-                    pred_q13,
-                    header.channels[0].vad_flags[i],
-                    header.channels[1].vad_flags[i],
-                    decode_only_middle,
-                    *prev_decode_only_middle
-                );
-                // #endregion
-            }
             if trace_pkt0 {
                 trace_checkpoint(dec, packet_idx, &format!("after_stereo_i{}", i));
             }
@@ -858,12 +639,6 @@ fn consume_main_payload(
 
         for ch in 0..packet_channels {
             if packet_idx == 0 && i == 0 && ch == 0 {
-                // #region agent log H72
-                eprintln!(
-                    "SILK_MAIN [after_header] tell={} rng={:#010x}",
-                    dec.tell(),
-                    dec.rng()
-                );
                 append_silk_debug_log(
                     "silk-main-after-header",
                     "H72",
@@ -880,14 +655,6 @@ fn consume_main_payload(
                 // #endregion
             }
             if ch == 1 && decode_only_middle {
-                if matches!(packet_idx, 0 | 4 | 99 | 602) {
-                    // #region agent log H33
-                    eprintln!(
-                        "DBG H33 rust pkt{} iframe{} skip_ch1_mid_only",
-                        packet_idx, i
-                    );
-                    // #endregion
-                }
                 continue;
             }
             let cond = if i == 0 {
@@ -909,12 +676,6 @@ fn consume_main_payload(
                 cond,
             )?;
             if packet_idx == 0 && i == 0 && ch == 0 {
-                // #region agent log H73
-                eprintln!(
-                    "SILK_MAIN [after_indices] tell={} rng={:#010x}",
-                    dec.tell(),
-                    dec.rng()
-                );
                 append_silk_debug_log(
                     "silk-main-after-indices",
                     "H73",
@@ -963,12 +724,6 @@ fn consume_main_payload(
             let pulses =
                 lbrr::decode_pulses(dec, side.signal_type, side.quant_offset_type, frame_length)?;
             if packet_idx == 0 && i == 0 && ch == 0 {
-                // #region agent log H74
-                eprintln!(
-                    "SILK_MAIN [after_pulses] tell={} rng={:#010x}",
-                    dec.tell(),
-                    dec.rng()
-                );
                 append_silk_debug_log(
                     "silk-main-after-pulses",
                     "H74",
@@ -1002,34 +757,6 @@ fn consume_main_payload(
                 lpc_order: tables::nlsf_codebook(states[ch].fs_khz).order,
             };
             signal_types[ch][i] = frame_params.signal_type as i32;
-            if packet_idx == 223 && i == 0 && ch == 0 {
-                // #region agent log H28
-                eprintln!(
-                    "DBG H28 rust pkt223 if0 interp_coef_q2={} pred0={:?} pred1={:?}",
-                    side.nlsf.interp_coef_q2,
-                    &pred_coef_q12[ch][i][0][..frame_params.lpc_order],
-                    &pred_coef_q12[ch][i][1][..frame_params.lpc_order]
-                );
-                // #endregion
-            }
-            if matches!(packet_idx, 30 | 223) && i == 0 && ch == 0 {
-                let state_len = frame_params.lpc_order.min(10);
-                let out_tail_start = core_state[ch].out_buf.len().saturating_sub(8);
-                // #region agent log H19
-                eprintln!(
-                    "DBG H19 rust pkt{} if0 entry prev_gain_q16={} lag_prev={} signal_type={} gain_indices={:?} lag_index={} contour_index={} slpc10={:?} out_buf_tail8={:?}",
-                    packet_idx,
-                    core_state[ch].prev_gain_q16,
-                    core_state[ch].lag_prev,
-                    frame_params.signal_type,
-                    frame_params.gain_indices,
-                    frame_params.lag_index,
-                    frame_params.contour_index,
-                    &core_state[ch].s_lpc_q14_buf[..state_len],
-                    &core_state[ch].out_buf[out_tail_start..]
-                );
-                // #endregion
-            }
             let pcm_range = i * frame_length..(i + 1) * frame_length;
             let trace = decode_core::decode_core(
                 &frame_params,
@@ -1042,58 +769,6 @@ fn consume_main_payload(
             if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
                 trace_core(packet_idx, "exc_Q14", &trace.exc_q14_head);
                 trace_core(packet_idx, "sLPC_Q14", &trace.s_lpc_q14_head);
-            }
-            if matches!(packet_idx, 0 | 4 | 99 | 602) {
-                let iframe_start = i * frame_length;
-                let iframe_end = (iframe_start + 8).min(iframe_start + frame_length);
-                // #region agent log H34
-                eprintln!(
-                    "DBG H34 rust pkt{} ch{} iframe{} internal_pcm[0..8]={:?}",
-                    packet_idx,
-                    ch,
-                    i,
-                    &internal_pcm[ch][iframe_start..iframe_end]
-                );
-                if packet_idx == 4 && frame_length >= 148 {
-                    eprintln!(
-                        "DBG H45 rust pkt4 ch{} iframe{} internal_pcm[140..148]={:?}",
-                        ch,
-                        i,
-                        &internal_pcm[ch][iframe_start + 140..iframe_start + 148]
-                    );
-                }
-                // #endregion
-            }
-            if silk_trace_enabled() && ch == 0 {
-                let iframe_start = i * frame_length;
-                let iframe_end = (iframe_start + 8).min(iframe_start + frame_length);
-                if packet_idx == 1 {
-                    let iframe_pcm = &internal_pcm[ch][i * frame_length..(i + 1) * frame_length];
-                    let max_abs = iframe_pcm.iter().map(|x| x.abs()).max().unwrap_or(0);
-                    eprintln!(
-                        "R pkt1 iframe{} signal_type={} max_abs_pcm={} pcm[0..8]={:?}",
-                        i,
-                        frame_params.signal_type,
-                        max_abs,
-                        &internal_pcm[ch][iframe_start..iframe_end]
-                    );
-                }
-                if matches!(packet_idx, 29 | 30 | 223) && i == 0 {
-                    let state_len = frame_params.lpc_order.min(10);
-                    // #region agent log H20
-                    eprintln!(
-                        "DBG H20 rust pkt{} if0 state[0..{}]: {:?}",
-                        packet_idx,
-                        state_len,
-                        &core_state[ch].s_lpc_q14_buf[..state_len]
-                    );
-                    eprintln!(
-                        "DBG H21 rust pkt{} if0 internal_pcm[0..8]: {:?}",
-                        packet_idx,
-                        &internal_pcm[ch][iframe_start..iframe_end]
-                    );
-                    // #endregion
-                }
             }
             if trace_pkt0 {
                 trace_checkpoint(dec, packet_idx, &format!("after_main_i{}_ch{}", i, ch));
@@ -1111,80 +786,20 @@ fn consume_main_payload(
                 states[0].fs_khz,
                 packet_idx,
             );
-            if matches!(packet_idx, 0 | 4 | 99 | 602) {
-                let iframe_start = i * frame_length;
-                let iframe_end = (iframe_start + 8).min(iframe_start + frame_length);
-                // #region agent log H37
-                eprintln!(
-                    "DBG H37 rust pkt{} post_ms_to_lr ch0[0..8]={:?} ch1[0..8]={:?}",
-                    packet_idx,
-                    &internal_pcm[0][iframe_start..iframe_end],
-                    &internal_pcm[1][iframe_start..iframe_end]
-                );
-                if packet_idx == 0 && frame_length >= 52 {
-                    eprintln!(
-                        "DBG H41 rust pkt0 post_ms_to_lr ch0[44..52]={:?} ch1[44..52]={:?}",
-                        &internal_pcm[0][iframe_start + 44..iframe_start + 52],
-                        &internal_pcm[1][iframe_start + 44..iframe_start + 52]
-                    );
-                }
-                if packet_idx == 4 && frame_length >= 148 {
-                    eprintln!(
-                        "DBG H43 rust pkt4 post_ms_to_lr ch0[140..148]={:?} ch1[140..148]={:?}",
-                        &internal_pcm[0][iframe_start + 140..iframe_start + 148],
-                        &internal_pcm[1][iframe_start + 140..iframe_start + 148]
-                    );
-                }
-                // #endregion
-            }
         } else {
             let pcm_range = i * frame_length..(i + 1) * frame_length;
             let frame = &internal_pcm[0][pcm_range.clone()];
             stereo_state
                 .s_mid
                 .copy_from_slice(&frame[frame_length - 2..frame_length]);
-            if packet_idx == 601 {
-                // #region agent log H38
-                eprintln!(
-                    "DBG H38 rust pkt{} iframe{} buffer_smid={:?}",
-                    packet_idx, i, stereo_state.s_mid
-                );
-                // #endregion
-            }
         }
 
         *prev_decode_only_middle = decode_only_middle;
-    }
-    if matches!(packet_idx, 99) {
-        eprintln!(
-            "DBG H56 rust pkt{} signal_types_ch0={:?} signal_types_ch1={:?} mid_only={:?}",
-            packet_idx,
-            &signal_types[0][..internal_frames],
-            &signal_types[1][..internal_frames],
-            &mid_only_flags[..internal_frames]
-        );
     }
     if packet_idx == 1118 {
         let internal_samples_per_channel = internal_frames * frame_length;
         let head_end = 8.min(internal_samples_per_channel);
         let tail_start = internal_samples_per_channel.saturating_sub(8);
-        // #region agent log H109
-        eprintln!(
-            "TV12 pkt1118 internal_pcm[0..8]={:?}",
-            &internal_pcm[0][..head_end]
-        );
-        eprintln!(
-            "TV12 pkt1118 internal_pcm_last8={:?}",
-            &internal_pcm[0][tail_start..internal_samples_per_channel]
-        );
-        eprintln!(
-            "TV12 pkt1118 internal_fs={} signal_type={} packet_channels={} internal_frames={} frame_length={}",
-            states[0].fs_khz,
-            signal_types[0][0],
-            packet_channels,
-            internal_frames,
-            frame_length
-        );
         append_silk_debug_log(
             "tv12-pkt1118-internal-pcm",
             "H109A",
@@ -1199,7 +814,6 @@ fn consume_main_payload(
                 &internal_pcm[0][tail_start..internal_samples_per_channel]
             ),
         );
-        // #endregion
     }
     Ok(())
 }
@@ -1207,51 +821,17 @@ fn consume_main_payload(
 /// Check whether SILK entropy tracing is enabled.
 ///
 /// Params: none.
-/// Returns: true when `OPUS_SILK_TRACE=1` is set.
+/// Returns: `false`; runtime tracing is disabled in cleanup builds.
 fn silk_trace_enabled() -> bool {
-    std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1")
-}
-
-/// Append 16-bit PCM samples to a raw little-endian dump file.
-///
-/// Params: destination file `path` and signed PCM `samples`.
-/// Returns: nothing; I/O errors are ignored for debugging dumps.
-fn append_pcm_dump(path: &str, samples: &[i16]) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        for &sample in samples {
-            let _ = file.write_all(&sample.to_le_bytes());
-        }
-    }
+    false
 }
 
 /// Append one NDJSON debug line for SILK hybrid tracing.
 ///
 /// Params: event `message`, `hypothesis_id`, and raw JSON `data`.
-/// Returns: nothing; debug I/O failures are ignored.
+/// Returns: nothing; runtime debug logging is disabled in cleanup builds.
 fn append_silk_debug_log(message: &str, hypothesis_id: &str, data: &str) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let line = format!(
-            "{{\"sessionId\":\"9a4e1c\",\"runId\":\"hybrid-silk-trace\",\"hypothesisId\":\"{}\",\"location\":\"crates/opus-decoder/src/silk/mod.rs\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
-            hypothesis_id, message, data, ts
-        );
-        let _ = file.write_all(line.as_bytes());
-    }
+    let _ = (message, hypothesis_id, data);
 }
 
 /// Emit packet-0 SILK entropy checkpoint with tell/tell_frac/rng.
@@ -1259,14 +839,7 @@ fn append_silk_debug_log(message: &str, hypothesis_id: &str, data: &str) {
 /// Params: immutable entropy decoder `dec`, `packet_idx`, and textual `label`.
 /// Returns: nothing.
 fn trace_checkpoint(dec: &EcDec<'_>, packet_idx: usize, label: &str) {
-    eprintln!(
-        "SILK pkt{} [{}] tell={} tell_frac={} rng={:#010x}",
-        packet_idx,
-        label,
-        dec.tell(),
-        dec.tell_frac(),
-        dec.rng()
-    );
+    let _ = (dec, packet_idx, label);
 }
 
 /// Decode, optionally interpolate, and convert one NLSF vector to LPC halves.
@@ -1280,9 +853,9 @@ fn update_lpc_from_nlsf(
     prev_nlsf_q15: &mut [i16; tables::MAX_LPC_ORDER],
     pred_coef_q12: &mut [[i16; tables::MAX_LPC_ORDER]; MAX_LPC_HALVES],
     first_frame_after_reset: &mut bool,
-    packet_idx: usize,
-    frame_idx: usize,
-    channel_idx: usize,
+    _packet_idx: usize,
+    _frame_idx: usize,
+    _channel_idx: usize,
 ) {
     let codebook = tables::nlsf_codebook(fs_khz);
     let order = codebook.order;
@@ -1320,15 +893,6 @@ fn update_lpc_from_nlsf(
         pred_coef_q12[0][..order].copy_from_slice(&pred1[..order]);
     }
 
-    if packet_idx == 223 && frame_idx == 0 && channel_idx == 0 {
-        // #region agent log H29
-        eprintln!(
-            "DBG H29 rust pkt223 if0 prev_nlsf={:?} curr_nlsf={:?}",
-            &prev_nlsf_q15[..order],
-            &curr_nlsf_q15[..order]
-        );
-        // #endregion
-    }
     prev_nlsf_q15[..order].copy_from_slice(&curr_nlsf_q15[..order]);
     *first_frame_after_reset = false;
 }
@@ -1346,16 +910,7 @@ fn trace_lpc(
     lpc_q12: &[i16],
     fs_khz: u32,
 ) {
-    let order = tables::nlsf_codebook(fs_khz).order;
-    let coeffs = lpc_q12[..order]
-        .iter()
-        .map(i16::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    eprintln!(
-        "SILK pkt{} LPC ch{} i{} {}_q12: {}",
-        packet_idx, channel, frame_idx, label, coeffs
-    );
+    let _ = (packet_idx, channel, frame_idx, label, lpc_q12, fs_khz);
 }
 
 /// Emit packet-0 SILK core trace for excitation or synthesis state.
@@ -1363,12 +918,7 @@ fn trace_lpc(
 /// Params: `packet_idx`, textual `label`, and signed sample `values`.
 /// Returns: nothing.
 fn trace_core(packet_idx: usize, label: &str, values: &[i32; 8]) {
-    let rendered = values
-        .iter()
-        .map(i32::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    eprintln!("SILK pkt{} {}[0..8]: {}", packet_idx, label, rendered);
+    let _ = (packet_idx, label, values);
 }
 
 /// Decode and expand LBRR per-internal-frame flags for one coded channel.

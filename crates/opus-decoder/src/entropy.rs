@@ -375,7 +375,7 @@ impl<'a> EcDec<'a> {
                 }
             }
         }
-        let ret = (window as u32) & ((1u32 << bits) - 1);
+        let ret = window & ((1u32 << bits) - 1);
         window >>= bits;
         available -= bits as i32;
         self.end_window = window;

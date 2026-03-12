@@ -1,4 +1,5 @@
 //! CELT bit allocation logic (`rate.c`) for decoder path.
+#![allow(clippy::too_many_arguments)]
 
 use crate::celt::modes::CeltMode;
 use crate::entropy::EcDec;
@@ -113,7 +114,7 @@ pub(crate) fn clt_compute_allocation(
     channels: usize,
     lm: usize,
     dec: &mut EcDec<'_>,
-    packet_idx: usize,
+    _packet_idx: usize,
 ) -> AllocationResult {
     let mut total_bits = total.max(0);
     let skip_rsv = if total_bits >= (1 << BITRES) {
@@ -159,11 +160,6 @@ pub(crate) fn clt_compute_allocation(
             trim_offset[j] -= c << BITRES;
         }
     }
-    if packet_idx == 38 {
-        eprintln!("R pkt38 dyn_offsets={:?}", &offsets[..end]);
-        eprintln!("R pkt38 trim_offset={:?}", &trim_offset[..end]);
-    }
-
     let mut lo = 1i32;
     let mut hi = mode.nb_alloc_vectors as i32 - 1;
     while lo <= hi {
@@ -247,7 +243,7 @@ pub(crate) fn clt_compute_allocation(
         channels,
         lm,
         dec,
-        packet_idx,
+        _packet_idx,
     );
 
     AllocationResult {
@@ -287,7 +283,7 @@ fn interp_bits2pulses(
     channels: usize,
     lm: usize,
     dec: &mut EcDec<'_>,
-    packet_idx: usize,
+    _packet_idx: usize,
 ) -> (usize, i32) {
     let trace_packet0 = false;
     let c = channels as i32;
@@ -408,12 +404,8 @@ fn interp_bits2pulses(
     for j in start..coded_bands {
         let n0 = (mode.e_bands[j + 1] - mode.e_bands[j]) as i32;
         let n = n0 << lm;
-        let balance_before = balance;
         let bit = bits[j] + balance;
         let mut excess;
-        let mut debug_offset = 0i32;
-        let mut debug_den = 0i32;
-        let bits_before = bits[j];
         if n > 1 {
             excess = (bit - cap[j]).max(0);
             bits[j] = bit - excess;
@@ -423,7 +415,6 @@ fn interp_bits2pulses(
                 } else {
                     0
                 };
-            debug_den = den;
             let nclogn = den * (mode.log_n[j] as i32 + log_m);
             let mut offset = (nclogn >> 1) - den * FINE_OFFSET;
             if n == 2 {
@@ -434,7 +425,6 @@ fn interp_bits2pulses(
             } else if bits[j] + offset < den * 3 << BITRES {
                 offset += nclogn >> 3;
             }
-            debug_offset = offset;
             let mut e = (bits[j] + offset + (den << (BITRES - 1))).max(0);
             e = (e / den) >> BITRES;
             if c * e > (bits[j] >> BITRES) {
@@ -457,30 +447,6 @@ fn interp_bits2pulses(
             let extra_bits = (extra_fine * c) << BITRES;
             fine_priority[j] = i32::from(extra_bits >= excess - balance);
             excess -= extra_bits;
-        }
-        if packet_idx == 38 && j == 15 {
-            eprintln!(
-                "R_BITS2P band15 pre: bits_raw={} bit={} lo={} hi={} N={} C={} LM={} offset={} ndof={} floor={} balance_before={}",
-                bits_before,
-                bit,
-                lo,
-                hi,
-                n,
-                c,
-                lm,
-                debug_offset,
-                debug_den,
-                alloc_floor,
-                balance_before
-            );
-            eprintln!(
-                "R_BITS2P band15 post: ebits={} fine={} fine_priority={} excess={} balance_after={}",
-                ebits[j],
-                ebits[j],
-                fine_priority[j],
-                excess,
-                excess
-            );
         }
         balance = excess;
     }

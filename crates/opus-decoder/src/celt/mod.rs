@@ -1,7 +1,17 @@
-//! CELT (Opus CELT-only / hybrid layer) decoder.
+//! CELT decoder for Opus CELT-only and hybrid packets.
 //!
-//! This module is a decoder-first port of libopus' CELT implementation.
-#![allow(unused_variables, unused_assignments, dead_code)]
+//! The implementation stays structurally close to libopus to preserve
+//! conformance while keeping the decode path self-contained in Rust.
+#![allow(
+    unused_variables,
+    unused_assignments,
+    dead_code,
+    clippy::too_many_arguments,
+    clippy::needless_borrow,
+    clippy::get_first,
+    clippy::needless_range_loop,
+    clippy::unnecessary_cast
+)]
 
 use crate::Error;
 use crate::entropy::EcDec;
@@ -37,10 +47,6 @@ const TF_SELECT_TABLE: [[i8; 8]; 4] = [
     [0, -2, 0, -3, 2, 0, 1, -1],
     [0, -2, 0, -3, 3, 0, 1, -1],
 ];
-const DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log";
-const DEBUG_SESSION_ID: &str = "bea564";
-const DEBUG_RUNTIME_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log";
-const DEBUG_RUNTIME_SESSION_ID: &str = "bea564";
 static TRACE_PACKET_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// Result of decoding one CELT frame.
@@ -236,7 +242,8 @@ impl CeltDecoder {
     /// Params: packet `config`.
     /// Returns: upper coded band index for the current mode.
     pub(crate) fn debug_end_band(&self, config: u8) -> usize {
-        self.end_band_override.unwrap_or_else(|| bandwidth_end(config))
+        self.end_band_override
+            .unwrap_or_else(|| bandwidth_end(config))
     }
 
     /// Check whether packet should emit targeted debug logs.
@@ -244,69 +251,8 @@ impl CeltDecoder {
     /// Params: `packet_idx` absolute packet index in current test run.
     /// Returns: true when packet is in onset/hotspot probe set.
     fn should_trace_debug_packet(packet_idx: usize) -> bool {
-        packet_idx <= 12
-            || matches!(
-                packet_idx,
-                138 | 160
-                    | 162
-                    | 499
-                    | 605
-                    | 611
-                    | 905
-                    | 906
-                    | 907
-                    | 2272
-                    | 2273
-                    | 2274
-                    | 2275
-                    | 2276
-                    | 2364
-                    | 2367
-                    | 2371
-                    | 2534
-                    | 2686
-                    | 2687
-                    | 2688
-                    | 2689
-                    | 2690
-                    | 2691
-                    | 2693
-                    | 2756
-                    | 2757
-                    | 2758
-                    | 2759
-                    | 2760
-                    | 2761
-                    | 2764
-                    | 2765
-                    | 2766
-                    | 2767
-                    | 2805
-                    | 3226
-                    | 3277
-                    | 3350
-                    | 3353
-                    | 3363
-                    | 3364
-                    | 3375
-                    | 3536
-                    | 3541
-                    | 3547
-                    | 3568
-                    | 3569
-                    | 3573
-                    | 3893
-                    | 3903
-                    | 3978
-                    | 3979
-                    | 3980
-                    | 3986
-                    | 3987
-                    | 3992
-                    | 3993
-                    | 3998
-                    | 3999
-            )
+        let _ = packet_idx;
+        false
     }
 
     /// Append one NDJSON debug entry to the session log.
@@ -321,21 +267,7 @@ impl CeltDecoder {
         message: &str,
         data_json: &str,
     ) {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(DEBUG_LOG_PATH)
-        {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let line = format!(
-                "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
-                DEBUG_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
-            );
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-        }
+        let _ = (run_id, hypothesis_id, location, message, data_json);
     }
 
     /// Append one NDJSON debug entry to the active runtime debug session.
@@ -349,21 +281,7 @@ impl CeltDecoder {
         message: &str,
         data_json: &str,
     ) {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(DEBUG_RUNTIME_LOG_PATH)
-        {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let line = format!(
-                "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
-                DEBUG_RUNTIME_SESSION_ID, run_id, hypothesis_id, location, message, data_json, ts
-            );
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-        }
+        let _ = (run_id, hypothesis_id, location, message, data_json);
     }
 
     /// Apply first-order deemphasis to one channel buffer in-place.
@@ -586,7 +504,8 @@ impl CeltDecoder {
         accum: bool,
     ) -> Result<CeltFrameDecode, Error> {
         let frame_call_idx = TRACE_PACKET_CALL_IDX.fetch_add(1, Ordering::SeqCst);
-        let packet_idx = parent_packet_idx;
+        let _ = parent_packet_idx;
+        let packet_idx = usize::MAX;
         if self.fs_hz != 48_000 {
             return Err(Error::NotImplemented);
         }
@@ -604,22 +523,9 @@ impl CeltDecoder {
             });
         }
 
-        let trace_packet_idx = None;
-        let trace_this_packet = trace_packet_idx == Some(packet_idx);
-        let debug_packet = Self::should_trace_debug_packet(packet_idx);
+        let trace_this_packet = false;
+        let debug_packet = false;
         let coded_channels = packet_channels.clamp(1, 2) as usize;
-        if packet_idx == 5 {
-            let energy = self.prev_energy_head(5);
-            eprintln!(
-                "R pkt5 CELT_ENTRY decode_mem_abs={:.4} right={:.4} deemph={:.6} {:.6} energy[0..{}]={:?}",
-                self.decode_mem_abs_sum(),
-                self.decode_mem_right_abs_sum(),
-                self.deemph_mem[0],
-                self.deemph_mem[1],
-                energy.len(),
-                energy
-            );
-        }
         if debug_packet {
             let overlap_abs: f32 = self.overlap_tail().iter().map(|x| x.abs()).sum();
             let data = format!(
@@ -686,18 +592,6 @@ impl CeltDecoder {
             .end_band_override
             .unwrap_or_else(|| bandwidth_end(config));
         let active_len = ec.storage();
-        if packet_idx == 5 || packet_idx == 0 || (56..=60).contains(&packet_idx) {
-            eprintln!(
-                "R pkt{} CELT_CONFIG config={} start={} end={} packet_channels={} frame_size_48k={} frame_bytes={}",
-                packet_idx,
-                config,
-                start,
-                end,
-                packet_channels,
-                frame_size_48k,
-                active_len
-            );
-        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} config={} end={} coded_channels={} output_channels={} frame_bytes={} total_bits={}",
@@ -737,85 +631,9 @@ impl CeltDecoder {
             // #endregion
         }
         let total_bits = (active_len * 8) as i32;
-        // #region agent log H105
-        let trace_pkt38_stage = |stage: &str, ec: &EcDec<'_>| {
-            if packet_idx == 38 {
-                eprintln!(
-                    "R pkt38 [{}] nbits={} tell={} tell_frac={} rng={:#010x}",
-                    stage,
-                    ec.nbits_total(),
-                    ec.tell(),
-                    ec.tell_frac(),
-                    ec.rng()
-                );
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-                {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let line = format!(
-                        "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv09-pkt38-stage-nbits\",\"hypothesisId\":\"H105\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:738\",\"message\":\"pkt38_stage\",\"data\":{{\"stage\":\"{}\",\"nbits_total\":{},\"tell\":{},\"tell_frac\":{},\"rng\":{}}},\"timestamp\":{}}}\n",
-                        stage,
-                        ec.nbits_total(),
-                        ec.tell(),
-                        ec.tell_frac(),
-                        ec.rng(),
-                        ts
-                    );
-                    let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-                }
-            }
-        };
-        // #endregion
-        if packet_idx == 38 {
-            // #region agent log H104
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = format!(
-                    "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv09-pkt38-budget\",\"hypothesisId\":\"H104\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:738\",\"message\":\"pkt38_budget_inputs\",\"data\":{{\"total_bits\":{},\"storage\":{},\"frame_len\":{},\"end\":{},\"start\":{},\"config\":{}}},\"timestamp\":{}}}\n",
-                    total_bits,
-                    ec.storage(),
-                    frame.len(),
-                    end,
-                    start,
-                    config,
-                    ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            eprintln!(
-                "R pkt38 total_bits={} storage={} frame_len={} end={}",
-                total_bits,
-                ec.storage(),
-                frame.len(),
-                end
-            );
-            // #endregion
-        }
+        let trace_pkt38_stage = |_stage: &str, _ec: &EcDec<'_>| {};
         trace_pkt38_stage("entry", &ec);
         let mut tell = ec.tell();
-        if self.start_band == 17 && packet_idx == 0 {
-            // #region agent log H77
-            eprintln!(
-                "CELT_HYB [entry] tell={} tell_frac={} rng={:#010x} val={:#010x}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.debug_val()
-            );
-            // #endregion
-        }
         let silence_flag = if tell >= total_bits {
             true
         } else if tell == 1 {
@@ -825,17 +643,6 @@ impl CeltDecoder {
         };
         if silence_flag {
             tell = total_bits;
-        }
-        if self.start_band == 17 && packet_idx == 0 {
-            // #region agent log H78
-            eprintln!(
-                "CELT_HYB [after_silence] tell={} tell_frac={} rng={:#010x} val={:#010x}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.debug_val()
-            );
-            // #endregion
         }
         if trace_this_packet {
             debug_trace!(
@@ -912,17 +719,6 @@ impl CeltDecoder {
             // #endregion
         }
         tell = ec.tell();
-        if self.start_band == 17 && packet_idx == 0 {
-            // #region agent log H79
-            eprintln!(
-                "CELT_HYB [after_postfilter] tell={} tell_frac={} rng={:#010x} val={:#010x}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.debug_val()
-            );
-            // #endregion
-        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_postfilter] tell={}",
@@ -943,17 +739,6 @@ impl CeltDecoder {
         } else {
             false
         };
-        if self.start_band == 17 && packet_idx == 0 {
-            // #region agent log H80
-            eprintln!(
-                "CELT_HYB [after_transient] tell={} tell_frac={} rng={:#010x} val={:#010x}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.debug_val()
-            );
-            // #endregion
-        }
         if packet_idx == 905 {
             debug_trace!(
                 "R pkt905 frame_size_48k={} lm={} is_transient={}",
@@ -972,17 +757,6 @@ impl CeltDecoder {
         trace_pkt38_stage("transient", &ec);
         tell = ec.tell();
         let intra_ener = tell + 3 <= total_bits && ec.dec_bit_logp(3);
-        if self.start_band == 17 && packet_idx == 0 {
-            // #region agent log H82
-            eprintln!(
-                "CELT_HYB [after_intra] tell={} tell_frac={} rng={:#010x} val={:#010x}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.debug_val()
-            );
-            // #endregion
-        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_intra_ener] tell={}",
@@ -1020,17 +794,6 @@ impl CeltDecoder {
             lm,
             total_bits,
         );
-        if self.start_band == 17 && packet_idx == 0 {
-            // #region agent log H81
-            eprintln!(
-                "CELT_HYB [after_coarse] tell={} tell_frac={} rng={:#010x} val={:#010x}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.debug_val()
-            );
-            // #endregion
-        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_coarse_energy] tell={}",
@@ -1251,60 +1014,6 @@ impl CeltDecoder {
             &mut ec,
             packet_idx,
         );
-        if packet_idx == 38 {
-            let fine_quant_dump = &alloc.fine_quant[..end];
-            // #region agent log H107
-            eprintln!(
-                "R pkt38 alloc: coded_bands={} fine_quant={:?}",
-                alloc.coded_bands,
-                fine_quant_dump
-            );
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let fine_csv = fine_quant_dump
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let line = format!(
-                    "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv09-pkt38-alloc\",\"hypothesisId\":\"H107\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:1237\",\"message\":\"pkt38_alloc_dump\",\"data\":{{\"coded_bands\":{},\"fine_quant_csv\":\"{}\"}},\"timestamp\":{}}}\n",
-                    alloc.coded_bands,
-                    fine_csv,
-                    ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            for j in start..end {
-                eprintln!(
-                    "R_ALLOC band={} pulses={} fine_quant={} fine_priority={} cap={}",
-                    j,
-                    alloc.pulses[j],
-                    alloc.fine_quant[j],
-                    alloc.fine_priority[j],
-                    cap[j]
-                );
-            }
-            // #endregion
-        }
-        if packet_idx == 58 {
-            eprintln!(
-                "R pkt58 alloc tell_before_bands={} total_bits_q={} bits={} coded_bands={} intensity={} dual_stereo={} balance={}",
-                ec.tell_frac(),
-                (active_len as i32 * 8) << BITRES,
-                bits,
-                alloc.coded_bands,
-                alloc.intensity,
-                alloc.dual_stereo,
-                alloc.balance
-            );
-        }
         if trace_this_packet {
             debug_trace!("R pkt{} [after_alloc] tell={}", packet_idx, ec.tell_frac());
             debug_trace!(
@@ -1378,44 +1087,6 @@ impl CeltDecoder {
             packet_idx,
         );
         trace_pkt38_stage("fine", &ec);
-        if packet_idx == 38 {
-            // #region agent log H102
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = format!(
-                    "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv09-pkt38-celt-stage\",\"hypothesisId\":\"H102\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:1246\",\"message\":\"pkt38_after_fine_energy\",\"data\":{{\"tell\":{},\"tell_frac\":{},\"rng\":{},\"nbits_total\":{},\"coded_bands\":{},\"intensity\":{},\"dual_stereo\":{},\"anti_collapse_rsv\":{}}},\"timestamp\":{}}}\n",
-                    ec.tell(),
-                    ec.tell_frac(),
-                    ec.rng(),
-                    ec.nbits_total(),
-                    alloc.coded_bands,
-                    alloc.intensity,
-                    alloc.dual_stereo,
-                    anti_collapse_rsv,
-                    ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            eprintln!(
-                "TV09 pkt38 after_fine: tell={} tell_frac={} rng={:#010x} nbits_total={} coded_bands={} intensity={} dual_stereo={} anti_rsv={}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                ec.nbits_total(),
-                alloc.coded_bands,
-                alloc.intensity,
-                alloc.dual_stereo,
-                anti_collapse_rsv
-            );
-            // #endregion
-        }
         if trace_this_packet {
             debug_trace!(
                 "R pkt{} [after_fine_energy] tell={}",
@@ -1613,19 +1284,6 @@ impl CeltDecoder {
                 let _ = std::io::Write::write_all(&mut f, line.as_bytes());
             }
             // #endregion
-        }
-        if trace_packet_idx == Some(packet_idx) {
-            let m = 1usize << lm;
-            for i in 0..self.mode.nb_ebands {
-                let start = m * self.mode.e_bands[i] as usize;
-                let end = m * self.mode.e_bands[i + 1] as usize;
-                let band_sum: f32 = mdct_in[start..end].iter().sum();
-                debug_trace!("pkt{} band {} norm_sum={:.6}", packet_idx, i, band_sum);
-                if let Some(side) = mdct_side.as_ref() {
-                    let side_sum: f32 = side[start..end].iter().sum();
-                    debug_trace!("pkt{} band {} norm_sum_side={:.6}", packet_idx, i, side_sum);
-                }
-            }
         }
         if trace_this_packet && coded_channels == 2 {
             let mid_abs = mdct_in.iter().map(|v| v.abs()).sum::<f32>();
@@ -3496,17 +3154,6 @@ impl CeltDecoder {
                 );
                 let _ = std::io::Write::write_all(&mut f, line.as_bytes());
             }
-            eprintln!(
-                "TV09 pkt38 before_final_range tell={} tell_frac={} rng={:#010x} seed={} is_transient={} anti_on={} lm={}",
-                ec.tell(),
-                ec.tell_frac(),
-                ec.rng(),
-                self.rng_seed,
-                is_transient,
-                anti_collapse_on,
-                lm
-            );
-            // #endregion
         }
         self.final_range = ec.final_range();
         if packet_idx < 5 {
@@ -3517,22 +3164,6 @@ impl CeltDecoder {
             );
         }
         self.rng_seed = ec.rng();
-        if packet_idx == 5 {
-            let sample_end = out.len().min(16);
-            eprintln!(
-                "R pkt5 CELT_OUT pcm[0..{}]={:?}",
-                sample_end,
-                &out[..sample_end]
-            );
-            eprintln!(
-                "R pkt5 CELT_OUT decode_mem_abs={:.4} right={:.4} deemph={:.6} {:.6}",
-                self.decode_mem_abs_sum(),
-                self.decode_mem_right_abs_sum(),
-                self.deemph_mem[0],
-                self.deemph_mem[1]
-            );
-            eprintln!("R pkt5 energy[0..13]={:?}", &self.prev_energy[..13]);
-        }
         let _ = (
             OVERLAP_48K_20MS,
             self.mode.preemph[0],

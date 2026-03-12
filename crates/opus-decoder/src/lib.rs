@@ -1,7 +1,7 @@
-//! Pure Rust Opus decoder (decoder-first), no FFI.
+//! Public API for the pure Rust Opus decoder port.
 //!
-//! This crate is currently a scaffold; the decoding algorithms are ported in
-//! stages with RFC conformance vectors as the primary gate.
+//! The crate keeps the CELT and SILK internals close to libopus while exposing
+//! stable packet-to-PCM decoding entry points.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -12,25 +12,133 @@
 )]
 
 macro_rules! debug_trace {
-    ($($arg:tt)*) => {{
-        if false {
-            eprintln!($($arg)*);
-        }
-    }};
+    ($($arg:tt)*) => {};
 }
 
 mod celt;
+#[doc(hidden)]
 pub mod compare;
 mod entropy;
 mod error;
 mod packet;
 mod silk;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::entropy::EcDec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use error::Error;
 
 static TRACE_DECODE_PACKET_IDX: AtomicUsize = AtomicUsize::new(0);
+
+pub struct OpusDecoder {
+    decoder: Decoder,
+    float_scratch: Vec<i16>,
+}
+
+impl OpusDecoder {
+    /// Create a new decoder.
+    ///
+    /// Parameters: `sample_rate` must be 8000, 12000, 16000, 24000, or 48000,
+    /// and `channels` must be 1 or 2.
+    /// Returns: initialized decoder state on success.
+    pub fn new(sample_rate: u32, channels: usize) -> Result<Self, OpusError> {
+        let channels =
+            u8::try_from(channels).map_err(|_| OpusError::InvalidArgument("channels"))?;
+        let decoder = Decoder::new(sample_rate, channels).map_err(OpusError::from)?;
+
+        Ok(Self {
+            decoder,
+            float_scratch: Vec::new(),
+        })
+    }
+
+    /// Decode a packet into 16-bit PCM samples (interleaved if stereo).
+    ///
+    /// Parameters: Opus `packet`, writable interleaved PCM `pcm`, and FEC flag `fec`.
+    /// Returns: number of decoded samples per channel.
+    pub fn decode(
+        &mut self,
+        packet: &[u8],
+        pcm: &mut [i16],
+        fec: bool,
+    ) -> Result<usize, OpusError> {
+        if fec {
+            return Err(OpusError::InternalError);
+        }
+
+        self.decoder
+            .decode(Some(packet), pcm)
+            .map_err(OpusError::from)
+    }
+
+    /// Decode a packet into f32 PCM samples (interleaved if stereo).
+    ///
+    /// Parameters: Opus `packet`, writable interleaved PCM `pcm`, and FEC flag `fec`.
+    /// Returns: number of decoded samples per channel.
+    pub fn decode_float(
+        &mut self,
+        packet: &[u8],
+        pcm: &mut [f32],
+        fec: bool,
+    ) -> Result<usize, OpusError> {
+        if fec {
+            return Err(OpusError::InternalError);
+        }
+
+        let parsed = packet::parse_packet(packet).map_err(OpusError::from)?;
+        let needed =
+            parsed.samples_per_channel(self.decoder.fs_hz()) * self.decoder.channels() as usize;
+        if pcm.len() < needed {
+            return Err(OpusError::BufferTooSmall);
+        }
+
+        if self.float_scratch.len() < needed {
+            self.float_scratch.resize(needed, 0);
+        }
+
+        let samples_per_channel = self
+            .decoder
+            .decode(Some(packet), &mut self.float_scratch[..needed])
+            .map_err(OpusError::from)?;
+        let written = samples_per_channel * self.decoder.channels() as usize;
+        for (dst, src) in pcm.iter_mut().zip(self.float_scratch[..written].iter()) {
+            *dst = f32::from(*src) / 32768.0;
+        }
+
+        Ok(samples_per_channel)
+    }
+
+    /// Reset decoder state (e.g. after packet loss or seek).
+    ///
+    /// Parameters: none.
+    /// Returns: nothing.
+    pub fn reset(&mut self) {
+        self.decoder.reset();
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpusError {
+    #[error("invalid packet")]
+    InvalidPacket,
+    #[error("internal error")]
+    InternalError,
+    #[error("buffer too small")]
+    BufferTooSmall,
+    #[error("invalid argument: {0}")]
+    InvalidArgument(&'static str),
+}
+
+impl From<Error> for OpusError {
+    fn from(value: Error) -> Self {
+        match value {
+            Error::InvalidSampleRate(_) => Self::InvalidArgument("sample_rate"),
+            Error::InvalidChannels(_) => Self::InvalidArgument("channels"),
+            Error::PacketTooLarge { .. } | Error::BadPacket => Self::InvalidPacket,
+            Error::OutputTooSmall { .. } => Self::BufferTooSmall,
+            Error::NotImplemented => Self::InternalError,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Decoder {
@@ -157,7 +265,6 @@ impl Decoder {
     /// - Returns the number of samples per channel written.
     pub fn decode(&mut self, packet: Option<&[u8]>, out: &mut [i16]) -> Result<usize, Error> {
         let packet_idx = TRACE_DECODE_PACKET_IDX.fetch_add(1, Ordering::SeqCst);
-        let trace_packet_idx = None;
         let (toc, samples_per_channel_needed) = match packet {
             Some(packet) => {
                 let pp = packet::parse_packet(packet)?;
@@ -180,90 +287,14 @@ impl Decoder {
         };
 
         let config = (toc >> 3) & 0x1f;
-        let silk_trace = std::env::var("OPUS_SILK_TRACE").ok().as_deref() == Some("1");
         let mode = match config {
             0..=11 => OpusMode::SilkOnly,
             12..=15 => OpusMode::Hybrid,
             16..=31 => OpusMode::CeltOnly,
             _ => unreachable!(),
         };
-        let mode_name = match mode {
-            OpusMode::SilkOnly => "silk",
-            OpusMode::Hybrid => "hybrid",
-            OpusMode::CeltOnly => "celt",
-        };
-        if std::env::var("OPUS_DUMP_MODES").is_ok() {
-            eprintln!(
-                "PKT{} mode={:?} prev_mode={:?}",
-                packet_idx, mode, self.prev_mode
-            );
-        }
-        // #region agent log
-        let log_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(".cursor")
-            .join("debug-bea564.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-        {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let line = format!(
-                "{{\"sessionId\":\"bea564\",\"runId\":\"run-tv01-tv10-debug1\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:mode_gate\",\"message\":\"decoder_mode_gate\",\"data\":{{\"packet_idx\":{},\"toc\":{},\"config\":{},\"mode\":\"{}\",\"decoder_channels\":{},\"samples_per_channel_needed\":{}}},\"timestamp\":{}}}\n",
-                packet_idx, toc, config, mode_name, self.channels, samples_per_channel_needed, ts
-            );
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-        }
-        // #endregion
         // Parse again to get per-frame slices.
         let pp = packet::parse_packet(packet.unwrap())?;
-        if (600..=604).contains(&packet_idx) {
-            // #region agent log H57
-            eprintln!(
-                "DBG H57 rust pkt{} toc={:#04x} packet_channels={} prev_channels={} mode={:?}",
-                packet_idx,
-                toc,
-                pp.packet_channels,
-                self.silk.prev_packet_channels(),
-                mode
-            );
-            // #endregion
-        }
-        if silk_trace && packet_idx <= 2 && mode == OpusMode::SilkOnly {
-            eprintln!(
-                "SILK pkt{} toc={:#04x} config={} code={} nb_frames={} samples_per_frame_48k={} samples_needed={}",
-                packet_idx,
-                pp.toc,
-                config,
-                pp.toc & 0x03,
-                pp.frame_count,
-                pp.samples_per_frame_48k,
-                samples_per_channel_needed
-            );
-        }
-        if trace_packet_idx == Some(packet_idx) {
-            // #region agent log
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-4200c5.log")
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = format!(
-                    "{{\"sessionId\":\"4200c5\",\"runId\":\"run-stereo-probe\",\"hypothesisId\":\"H1\",\"location\":\"crates/opus-decoder/src/lib.rs:151\",\"message\":\"packet_vs_decoder_channels\",\"data\":{{\"packet_idx\":{},\"packet_channels\":{},\"decoder_channels\":{},\"toc\":{},\"config\":{}}},\"timestamp\":{}}}\n",
-                    packet_idx, pp.packet_channels, self.channels, pp.toc, config, ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            // #endregion
-        }
         self.last_packet_split_count = 0;
         self.last_final_range = 0;
 
@@ -306,42 +337,6 @@ impl Decoder {
                         out_frame,
                         false,
                     )?;
-                    if packet_idx == 38 {
-                        let tell = ec.tell();
-                        let len8 = (frame.len() * 8) as i32;
-                        let remaining = len8 - tell;
-                        // #region agent log H100
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-                        {
-                            let ts = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0);
-                            let line = format!(
-                                "{{\"sessionId\":\"9a4e1c\",\"runId\":\"tv09-pkt38-celt-post\",\"hypothesisId\":\"H100\",\"location\":\"crates/opus-decoder/src/lib.rs:292\",\"message\":\"packet38_post_celt\",\"data\":{{\"packet_idx\":{},\"config\":{},\"tell\":{},\"len8\":{},\"remaining\":{},\"final_range\":{},\"packet_channels\":{}}},\"timestamp\":{}}}\n",
-                                packet_idx,
-                                config,
-                                tell,
-                                len8,
-                                remaining,
-                                self.celt.final_range(),
-                                pp.packet_channels,
-                                ts
-                            );
-                            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-                        }
-                        eprintln!(
-                            "TV09 pkt38 post_celt tell={} len*8={} remaining={} celt_rng={:#010x}",
-                            tell,
-                            len8,
-                            remaining,
-                            self.celt.final_range()
-                        );
-                        // #endregion
-                    }
                     if apply_celt_transition {
                         apply_transition_fade_i16(
                             &celt_transition,
@@ -372,46 +367,6 @@ impl Decoder {
                         out_frame,
                     )?;
                     last_celt_to_silk = silk_frame.celt_to_silk;
-                    if packet_idx == 38 {
-                        // #region agent log H98
-                        eprintln!(
-                            "TV09 pkt38 mode={:?} config={} packet_channels={} prev_mode={:?} prev_had_redundancy={} has_redundancy={} celt_to_silk={}",
-                            mode,
-                            config,
-                            pp.packet_channels,
-                            self.prev_mode,
-                            had_redundancy,
-                            silk_frame.consumed_redundancy,
-                            silk_frame.celt_to_silk
-                        );
-                        // #endregion
-                    }
-                    if packet_idx == 4 {
-                        // #region agent log H47
-                        eprintln!(
-                            "DBG H47 rust pkt4 top_level_silk frame_samples_48k={} packet_channels={} written={} final_range={} consumed_redundancy={} redundancy_bytes={} celt_to_silk={} crossfade_applied=false",
-                            frame_samples_48k,
-                            pp.packet_channels,
-                            silk_frame.samples_per_channel,
-                            self.silk.final_range(),
-                            silk_frame.consumed_redundancy,
-                            silk_frame.redundancy_bytes,
-                            silk_frame.celt_to_silk
-                        );
-                        // #endregion
-                    }
-                    if matches!(packet_idx, 99) {
-                        eprintln!(
-                            "DBG H57 rust pkt{} top_level_silk packet_channels={} written={} final_range={} has_redundancy={} redundancy_bytes={} celt_to_silk={}",
-                            packet_idx,
-                            pp.packet_channels,
-                            silk_frame.samples_per_channel,
-                            self.silk.final_range(),
-                            silk_frame.consumed_redundancy,
-                            silk_frame.redundancy_bytes,
-                            silk_frame.celt_to_silk
-                        );
-                    }
                     let mut redundancy_rng = 0u32;
                     if silk_frame.consumed_redundancy {
                         let redundancy_data =
@@ -471,41 +426,10 @@ impl Decoder {
                     had_redundancy = silk_frame.consumed_redundancy && !silk_frame.celt_to_silk;
                     self.last_final_range = self.silk.final_range() ^ redundancy_rng;
                     written_per_channel += silk_frame.samples_per_channel;
-                    if silk_trace && packet_idx <= 2 {
-                        eprintln!(
-                            "SILK pkt{} frame_returned={} written_total={} frame_samples_48k={}",
-                            packet_idx,
-                            silk_frame.samples_per_channel,
-                            written_per_channel,
-                            frame_samples_48k
-                        );
-                    }
                 }
                 OpusMode::Hybrid => {
-                    if packet_idx <= 1 {
-                        // #region agent log H61
-                        eprintln!(
-                            "HYBRID pkt{} frame.len()={} config={} channels={}",
-                            packet_idx,
-                            frame.len(),
-                            config,
-                            pp.packet_channels
-                        );
-                        append_hybrid_debug_log(
-                            "hybrid-entry",
-                            "H61",
-                            packet_idx,
-                            &format!(
-                                "{{\"frame_len\":{},\"config\":{},\"packet_channels\":{},\"tell\":0,\"tell_frac\":0}}",
-                                frame.len(),
-                                config,
-                                pp.packet_channels
-                            ),
-                        );
-                        // #endregion
-                    }
                     let mut ec = EcDec::new(frame);
-                    let silk_frame = match self.silk.decode_frame_with_ec(
+                    let silk_frame = self.silk.decode_frame_with_ec(
                         frame,
                         &mut ec,
                         frame_samples_48k,
@@ -514,84 +438,12 @@ impl Decoder {
                         true,
                         packet_idx,
                         out_frame,
-                    ) {
-                        Ok(frame) => {
-                            if packet_idx <= 1 {
-                                // #region agent log H62
-                                if packet_idx == 0 {
-                                    eprintln!(
-                                        "HYB pkt0 post_silk tell={} rng={:#010x} val={:#010x}",
-                                        ec.tell(),
-                                        ec.rng(),
-                                        ec.debug_val()
-                                    );
-                                }
-                                append_hybrid_debug_log(
-                                    "hybrid-after-silk",
-                                    "H62",
-                                    packet_idx,
-                                    &format!(
-                                        "{{\"samples_per_channel\":{},\"tell\":{},\"tell_frac\":{},\"rng\":{},\"val\":{}}}",
-                                        frame.samples_per_channel,
-                                        ec.tell(),
-                                        ec.tell_frac(),
-                                        ec.rng(),
-                                        ec.debug_val()
-                                    ),
-                                );
-                                // #endregion
-                            }
-                            frame
-                        }
-                        Err(err) => {
-                            if packet_idx <= 1 {
-                                // #region agent log H62
-                                append_hybrid_debug_log(
-                                    "hybrid-silk-error",
-                                    "H62",
-                                    packet_idx,
-                                    &format!(
-                                        "{{\"error\":\"{}\",\"tell\":{},\"tell_frac\":{}}}",
-                                        err,
-                                        ec.tell(),
-                                        ec.tell_frac()
-                                    ),
-                                );
-                                // #endregion
-                            }
-                            return Err(err);
-                        }
-                    };
+                    )?;
                     let redundancy = if ec.tell() + 17 + 20 <= (frame.len() as i32) * 8 {
                         ec.dec_bit_logp(12)
                     } else {
                         false
                     };
-                    if packet_idx <= 1 {
-                        // #region agent log H63
-                        if packet_idx == 0 {
-                            eprintln!(
-                                "HYB pkt0 post_redund tell={} rng={:#010x} val={:#010x}",
-                                ec.tell(),
-                                ec.rng(),
-                                ec.debug_val()
-                            );
-                        }
-                        append_hybrid_debug_log(
-                            "hybrid-redundancy-gate",
-                            "H63",
-                            packet_idx,
-                            &format!(
-                                "{{\"redundancy\":{},\"tell\":{},\"tell_frac\":{},\"rng\":{},\"val\":{}}}",
-                                redundancy,
-                                ec.tell(),
-                                ec.tell_frac(),
-                                ec.rng(),
-                                ec.debug_val()
-                            ),
-                        );
-                        // #endregion
-                    }
                     let mut celt_to_silk = false;
                     let mut redundancy_bytes = 0usize;
                     if redundancy {
@@ -605,8 +457,9 @@ impl Decoder {
                     let apply_celt_to_silk_audio = redundancy
                         && celt_to_silk
                         && (self.prev_mode != Some(OpusMode::SilkOnly) || self.prev_redundancy);
-                    let reset_main_celt =
-                        self.prev_mode.is_some() && self.prev_mode != Some(mode) && !self.prev_redundancy;
+                    let reset_main_celt = self.prev_mode.is_some()
+                        && self.prev_mode != Some(mode)
+                        && !self.prev_redundancy;
                     if redundancy && celt_to_silk {
                         let redundancy_samples = (self.fs_hz as usize) / 200;
                         let redundancy_data = &frame[frame.len() - redundancy_bytes..];
@@ -628,13 +481,6 @@ impl Decoder {
                         self.celt.reset();
                     }
                     self.celt.set_start_band(17);
-                    if packet_idx == 0 {
-                        eprintln!(
-                            "HYB pkt0 celt_start={} celt_end={}",
-                            self.celt.debug_start_band(),
-                            self.celt.debug_end_band(config)
-                        );
-                    }
                     let celt_frame = match self.celt.decode_frame_with_ec(
                         frame,
                         &mut ec,
@@ -647,29 +493,11 @@ impl Decoder {
                     ) {
                         Ok(frame) => frame,
                         Err(err) => {
-                            if packet_idx <= 1 {
-                                // #region agent log H64
-                                append_hybrid_debug_log(
-                                    "hybrid-celt-error",
-                                    "H64",
-                                    packet_idx,
-                                    &format!(
-                                        "{{\"error\":\"{}\",\"tell\":{},\"tell_frac\":{}}}",
-                                        err,
-                                        ec.tell(),
-                                        ec.tell_frac()
-                                    ),
-                                );
-                                // #endregion
-                            }
                             self.celt.set_start_band(0);
                             return Err(err);
                         }
                     };
                     self.celt.set_start_band(0);
-                    if packet_idx == 0 {
-                        eprintln!("HYB pkt0 celt_rng={:#010x}", self.celt.final_range());
-                    }
                     debug_assert_eq!(
                         silk_frame.samples_per_channel,
                         celt_frame.samples_per_channel
@@ -718,7 +546,6 @@ impl Decoder {
                         }
                         self.last_final_range ^= redundant_rng;
                     }
-                    let mut applied_celt_to_silk = false;
                     if redundancy && celt_to_silk {
                         if apply_celt_to_silk_audio {
                             let overlap = (self.fs_hz as usize) / 400;
@@ -731,7 +558,6 @@ impl Decoder {
                                 self.celt.window(),
                                 self.fs_hz,
                             );
-                            applied_celt_to_silk = true;
                         }
                         self.last_final_range ^= redundant_rng;
                     }
@@ -830,29 +656,5 @@ fn silk_redundancy_end_band(config: u8) -> usize {
         12..=13 => 19,
         14..=15 => 21,
         _ => 21,
-    }
-}
-
-/// Append one NDJSON debug entry for hybrid decode tracing.
-///
-/// Params: event `message`, `hypothesis_id`, `packet_idx`, and JSON `data`.
-/// Returns: nothing; debug I/O failures are ignored.
-fn append_hybrid_debug_log(message: &str, hypothesis_id: &str, packet_idx: usize, data: &str) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log")
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let line = format!(
-            "{{\"sessionId\":\"9a4e1c\",\"runId\":\"hybrid-entry-trace\",\"hypothesisId\":\"{}\",\"location\":\"crates/opus-decoder/src/lib.rs\",\"message\":\"{}\",\"data\":{{\"packet_idx\":{},\"payload\":{}}},\"timestamp\":{}}}\n",
-            hypothesis_id, message, packet_idx, data, ts
-        );
-        let _ = file.write_all(line.as_bytes());
     }
 }

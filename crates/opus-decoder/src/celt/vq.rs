@@ -1,4 +1,5 @@
 //! CELT PVQ vector decode helpers (`vq.c`) for decoder path.
+#![allow(clippy::too_many_arguments)]
 
 use crate::celt::cwrs;
 use crate::entropy::EcDec;

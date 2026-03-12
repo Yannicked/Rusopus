@@ -1,5 +1,12 @@
 //! CELT energy dequantization (`quant_bands.c`) for decoder path.
-#![allow(unused_variables, unused_assignments, dead_code)]
+#![allow(
+    unused_variables,
+    unused_assignments,
+    dead_code,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::unnecessary_cast
+)]
 
 use crate::celt::laplace::ec_laplace_decode;
 use crate::celt::modes::CeltMode;
@@ -120,14 +127,6 @@ pub(crate) fn unquant_coarse_energy(
         for c in 0..channels {
             let tell = dec.tell();
             let tell_frac_before = dec.tell_frac();
-            if start == 17 {
-                // #region agent log H83
-                eprintln!(
-                    "R_COARSE band={} ch={} tell_before={} tell_frac_before={}",
-                    i, c, tell, tell_frac_before
-                );
-                // #endregion
-            }
             let qi = if total_bits - tell >= 15 {
                 let pi = 2 * i.min(20);
                 ec_laplace_decode(
@@ -143,18 +142,6 @@ pub(crate) fn unquant_coarse_energy(
             } else {
                 -1
             };
-            if start == 17 {
-                // #region agent log H84
-                eprintln!(
-                    "R_COARSE band={} ch={} qi={} tell_after={} tell_frac_after={}",
-                    i,
-                    c,
-                    qi,
-                    dec.tell(),
-                    dec.tell_frac()
-                );
-                // #endregion
-            }
             if trace_this_call {
                 debug_trace!(
                     "R pkt{} coarse band={} c={} qi={} tell_frac={}",
@@ -209,39 +196,11 @@ pub(crate) fn unquant_fine_energy(
             continue;
         }
         let tell_before_band = dec.tell_frac();
-        let guard_ok =
-            dec.tell() + (channels as i32) * extra <= (dec.storage() as i32) * 8;
-        if packet_idx == 38 && start == 0 {
-            // #region agent log H106
-            eprintln!(
-                "R_FINE band={} extra={} guard={} tell_before_band={} nbits_before_band={}",
-                i,
-                extra,
-                guard_ok,
-                dec.tell(),
-                dec.nbits_total()
-            );
-            // #endregion
-        }
+        let guard_ok = dec.tell() + (channels as i32) * extra <= (dec.storage() as i32) * 8;
         for c in 0..channels {
             let nbits_before = dec.nbits_total();
             let tell_before = dec.tell();
             let q2 = dec.dec_bits(extra as u32) as f32;
-            if packet_idx == 38 && start == 0 {
-                // #region agent log H106
-                eprintln!(
-                    "R_FINE band={} c={} extra={} guard={} tell_before={} nbits_before={} tell_after={} nbits_after={}",
-                    i,
-                    c,
-                    extra,
-                    guard_ok,
-                    tell_before,
-                    nbits_before,
-                    dec.tell(),
-                    dec.nbits_total()
-                );
-                // #endregion
-            }
             let offset =
                 (q2 + 0.5) * ((1u32 << (14 - extra as u32)) as f32) * (1.0 / 16384.0) - 0.5;
             old_ebands[i + c * mode.nb_ebands] += offset;

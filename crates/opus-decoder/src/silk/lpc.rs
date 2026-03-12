@@ -13,11 +13,6 @@ const MAX_PREDICTION_POWER_GAIN_INV_Q30: i32 = 107_374;
 /// Params: mutable `lpc_q12`, stabilized `nlsf_q15`, and LPC `order` (10 or 16).
 /// Returns: nothing; `lpc_q12[..order]` is overwritten.
 pub(super) fn nlsf2a(lpc_q12: &mut [i16], nlsf_q15: &[i16], order: usize) {
-    let dbg_pkt223_nlsf = order == 10
-        && nlsf_q15[..order]
-            == [
-                3734, 4720, 6401, 8407, 9236, 14359, 20445, 23284, 26072, 29935,
-            ];
     let ordering = match order {
         10 => &[0usize, 9, 6, 3, 4, 5, 8, 1, 2, 7][..],
         16 => &[0usize, 15, 8, 7, 4, 11, 12, 3, 2, 13, 10, 5, 6, 9, 14, 1][..],
@@ -49,27 +44,8 @@ pub(super) fn nlsf2a(lpc_q12: &mut [i16], nlsf_q15: &[i16], order: usize) {
     }
 
     lpc_fit(lpc_q12, &mut a32_qa1, 12, QA + 1, order);
-    if dbg_pkt223_nlsf {
-        // #region agent log H30
-        eprintln!(
-            "DBG H30 rust pkt223 nlsf2a pre_stabilize lpc_q12={:?} a32_qa1={:?}",
-            &lpc_q12[..order],
-            &a32_qa1[..order]
-        );
-        // #endregion
-    }
     for i in 0..MAX_LPC_STABILIZE_ITERATIONS {
         let inv_gain = lpc_inv_pred_gain(&lpc_q12[..order], order);
-        if dbg_pkt223_nlsf {
-            // #region agent log H31
-            eprintln!(
-                "DBG H31 rust pkt223 nlsf2a iter={} inv_gain={} lpc_q12={:?}",
-                i,
-                inv_gain,
-                &lpc_q12[..order]
-            );
-            // #endregion
-        }
         if inv_gain != 0 {
             break;
         }
@@ -224,11 +200,8 @@ fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32], order: usize) -> i32 {
             let rhs = tmp2.saturating_sub(mul32_frac_q(tmp1, rc_q31, 31));
             let next0 = rshift_round64((lhs as i64) * rc_mult2 as i64, mult2_q);
             let next1 = rshift_round64((rhs as i64) * rc_mult2 as i64, mult2_q);
-            if next0 < i32::MIN || next0 > i32::MAX || next1 < i32::MIN || next1 > i32::MAX {
-                return 0;
-            }
-            a_qa[n] = next0 as i32;
-            a_qa[k - n - 1] = next1 as i32;
+            a_qa[n] = next0;
+            a_qa[k - n - 1] = next1;
         }
     }
 
@@ -324,7 +297,7 @@ fn inverse32_var_q(value: i32, q_res: usize) -> i32 {
     let b32_nrm = value << b_headrm;
     let b32_inv = (i32::MAX >> 2) / (b32_nrm >> 16);
     let mut result = b32_inv << 16;
-    let err_q32 = (((1i32 << 29) - smulwb(b32_nrm, b32_inv)) << 3) as i32;
+    let err_q32 = ((1i32 << 29) - smulwb(b32_nrm, b32_inv)) << 3;
     result = smlaww(result, err_q32, b32_inv);
 
     let lshift = 61isize - b_headrm as isize - q_res as isize;

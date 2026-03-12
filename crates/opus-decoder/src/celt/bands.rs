@@ -1,5 +1,13 @@
 //! CELT band decode (`bands.c`) for mono decode-only vertical slice.
-#![allow(unused_variables, unused_assignments, dead_code)]
+#![allow(
+    unused_variables,
+    unused_assignments,
+    dead_code,
+    clippy::too_many_arguments,
+    clippy::needless_option_as_deref,
+    clippy::needless_range_loop,
+    clippy::get_first
+)]
 
 use crate::celt::modes::CeltMode;
 use crate::celt::quant_bands;
@@ -19,9 +27,6 @@ const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 
 const ORDERY_TABLE: [usize; 30] = [
     1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5,
 ];
-const DEBUG_LOG_PATH_A08C80: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log";
-const DEBUG_SESSION_ID_A08C80: &str = "bea564";
-
 /// CELT linear congruential generator used for folded/noise fill.
 ///
 /// Params: current seed.
@@ -41,21 +46,7 @@ fn append_anti_collapse_debug_log(
     message: &str,
     data_json: &str,
 ) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(DEBUG_LOG_PATH_A08C80)
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let line = format!(
-            "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
-            DEBUG_SESSION_ID_A08C80, run_id, hypothesis_id, location, message, data_json, ts
-        );
-        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-    }
+    let _ = (run_id, hypothesis_id, location, message, data_json);
 }
 
 /// Prevent transient energy collapse by injecting low-level noise.
@@ -1408,12 +1399,6 @@ pub(crate) fn quant_all_bands_mono(
 ) -> Vec<u8> {
     let trace_target = None;
     let trace_this_packet = trace_target == Some(packet_idx);
-    if packet_idx == 5 || packet_idx == 6 {
-        eprintln!(
-            "R pkt{} bands_entry seed={:#010x} coded_bands={}",
-            packet_idx, *seed, coded_bands
-        );
-    }
     let m = 1usize << lm;
     let mut masks = vec![0u8; mode.nb_ebands];
     let mut lowband_offset = 0usize;
@@ -1814,12 +1799,6 @@ pub(crate) fn quant_all_bands_stereo(
 ) -> Vec<u8> {
     let trace_target = None;
     let trace_this_packet = trace_target == Some(packet_idx);
-    if packet_idx == 5 || packet_idx == 6 {
-        eprintln!(
-            "R pkt{} bands_entry seed={:#010x} coded_bands={}",
-            packet_idx, *seed, coded_bands
-        );
-    }
     let m = 1usize << lm;
     let mut masks = vec![0u8; mode.nb_ebands * 2];
     let mut lowband_offset = 0usize;

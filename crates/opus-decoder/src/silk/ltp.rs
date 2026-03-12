@@ -1,4 +1,5 @@
 //! SILK long-term prediction helpers.
+#![allow(clippy::too_many_arguments)]
 
 use super::tables::{
     LTP_ORDER, LTP_SCALES_Q14, LTP_VQ_0_Q7, LTP_VQ_1_Q7, LTP_VQ_2_Q7, MAX_NB_SUBFR,
@@ -45,9 +46,9 @@ pub(super) fn ltp_filter(
     pitch_lag: usize,
     subfr_length: usize,
     ltp_coefs_q14: &[i16; LTP_ORDER],
-    packet_idx: usize,
-    frame_idx: usize,
-    subframe_idx: usize,
+    _packet_idx: usize,
+    _frame_idx: usize,
+    _subframe_idx: usize,
 ) {
     let start = *buf_idx - pitch_lag + (LTP_ORDER / 2);
     for i in 0..subfr_length {
@@ -74,24 +75,6 @@ pub(super) fn ltp_filter(
             ltp_q15[pred_base - 4],
             ltp_coefs_q14[4] as i32,
         );
-        if matches!(packet_idx, 30 | 223) && frame_idx == 0 && subframe_idx == 0 && i == 4 {
-            // #region agent log H25
-            eprintln!(
-                "DBG H25 rust pkt{} sf0 sample4 ltp_hist={:?} ltp_coefs={:?} ltp_pred_q13={} exc_q14={}",
-                packet_idx,
-                [
-                    ltp_q15[pred_base],
-                    ltp_q15[pred_base - 1],
-                    ltp_q15[pred_base - 2],
-                    ltp_q15[pred_base - 3],
-                    ltp_q15[pred_base - 4]
-                ],
-                ltp_coefs_q14,
-                ltp_pred_q13,
-                exc_q14[i]
-            );
-            // #endregion
-        }
         pres_q14[i] = exc_q14[i].saturating_add(ltp_pred_q13 << 1);
         ltp_q15[*buf_idx] = pres_q14[i] << 1;
         *buf_idx += 1;

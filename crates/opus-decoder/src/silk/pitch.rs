@@ -20,9 +20,9 @@ pub(super) fn decode_pitch_lags(
     let lag = min_lag + lag_index;
     let mut pitch_lags = [0i32; MAX_NB_SUBFR];
 
-    for k in 0..nb_subfr {
+    for (k, pitch_lag) in pitch_lags.iter_mut().enumerate().take(nb_subfr) {
         let contour = contour_value(fs_khz, nb_subfr, k, contour_index as usize) as i32;
-        pitch_lags[k] = (lag + contour).clamp(min_lag, max_lag);
+        *pitch_lag = (lag + contour).clamp(min_lag, max_lag);
     }
 
     pitch_lags

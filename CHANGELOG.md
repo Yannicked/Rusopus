@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-03-12
+
+- refactor(api): Phase 7 cleanup – removed all `OPUS_TRACE_*` / `eprintln!`
+  instrumentation from `crates/opus-decoder/src/`; stabilized public API
+  (`OpusDecoder::new`, `decode`, `decode_float`, `reset`, `OpusError` via
+  `thiserror`); added `//!` module-level doc comments to `lib.rs`, `celt/mod.rs`,
+  `silk/mod.rs`, `entropy.rs`; all mechanical clippy warnings resolved
+  (`-D warnings` clean). RFC conformance: 12/12 vectors still PASS.
+
 ## 2026-03-09
 
 - feat(silk): fixed mono Hybrid resampler carry by sourcing the 48 kHz handoff from `stereo_state.s_mid` instead of the stale mono history buffer; `testvector10` now passes (was `err=4.58`).

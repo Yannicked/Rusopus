@@ -36,7 +36,7 @@ pub(super) fn decode_gains(
         }
 
         prev = prev.clamp(0, N_LEVELS_QGAIN - 1);
-        gains_q16[k] = log2lin(smulwb(INV_SCALE_Q16, prev) + OFFSET).min(i32::MAX);
+        gains_q16[k] = log2lin(smulwb(INV_SCALE_Q16, prev) + OFFSET);
     }
 
     *prev_index = prev as i8;

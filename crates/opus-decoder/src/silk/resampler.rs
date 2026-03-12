@@ -1,18 +1,12 @@
 //! SILK decoder-side resampler for internal-rate PCM to 48 kHz.
 
 use crate::Error;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::resampler_private;
 
 const RESAMPLER_MAX_BATCH_SIZE_MS: usize = 10;
 const SILK_RESAMPLER_MAX_IIR_ORDER: usize = 6;
 const SILK_RESAMPLER_MAX_DELAY: usize = 96;
-const RESAMPLER_DEBUG_LOG_PATH: &str = "/Users/tadeusz/Opus/Rasopus/.cursor/debug-9a4e1c.log";
-const RESAMPLER_DEBUG_SESSION_ID: &str = "9a4e1c";
-static RESAMPLER_DEBUG_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// Decoder-side SILK resampler state.
 #[derive(Debug, Clone)]
@@ -89,12 +83,11 @@ impl SilkResampler {
 
         let mut written = 0usize;
         let first_block = self.delay_buf[..self.fs_in_khz].to_vec();
-        written += self.process_iir_fir(&first_block, &mut output[written..], "first_block");
+        written += self.process_iir_fir(&first_block, &mut output[written..]);
         let second_len = input.len().saturating_sub(self.fs_in_khz);
         written += self.process_iir_fir(
             &input[n_samples..n_samples + second_len],
             &mut output[written..],
-            "second_block",
         );
 
         if self.input_delay > 0 {
@@ -106,21 +99,15 @@ impl SilkResampler {
 
     /// Run the IIR+FIR upsampling core on one contiguous input slice.
     ///
-    /// Params: immutable `input` block, mutable `output` buffer, and `stage` label.
+    /// Params: immutable `input` block and mutable `output` buffer.
     /// Returns: number of output samples written.
-    fn process_iir_fir(&mut self, input: &[i16], output: &mut [i16], stage: &'static str) -> usize {
+    fn process_iir_fir(&mut self, input: &[i16], output: &mut [i16]) -> usize {
         if input.is_empty() {
             return 0;
         }
 
         let history = resampler_private::fir_history_len();
-        let call_idx = resampler_debug_call_index();
-        let input_abs_sum = abs_sum_i16(input);
-        let s_iir_before = self.s_iir;
         let mut total_written = 0usize;
-        let mut up2_abs_sum = 0i64;
-        let mut up2_first4 = [0i16; 4];
-        let mut captured_up2 = false;
         let mut in_offset = 0usize;
 
         while in_offset < input.len() {
@@ -133,12 +120,6 @@ impl SilkResampler {
                 &input[in_offset..in_offset + n_samples_in],
                 n_samples_in,
             );
-            let up2_slice = &buf[history..history + 2 * n_samples_in];
-            up2_abs_sum += abs_sum_i16(up2_slice);
-            if !captured_up2 {
-                up2_first4[..up2_slice.len().min(4)].copy_from_slice(&up2_slice[..up2_slice.len().min(4)]);
-                captured_up2 = true;
-            }
 
             let max_index_q16 = (n_samples_in as i32) << 17;
             let written = resampler_private::iir_fir_interpol(
@@ -155,41 +136,7 @@ impl SilkResampler {
             in_offset += n_samples_in;
         }
 
-        if let Some(call_idx) = call_idx {
-            let out_slice = &output[..total_written];
-            // #region agent log H53/H54/H55
-            append_resampler_debug_log(
-                "resampler.rs:151",
-                "resampler per-call internals",
-                "resamp-call-trace",
-                "H53",
-                call_idx,
-                stage,
-                input.len(),
-                total_written,
-                input_abs_sum,
-                up2_abs_sum,
-                abs_sum_i16(out_slice),
-                up2_first4,
-                s_iir_before,
-                self.s_iir,
-            );
-            // #endregion
-        }
-
         total_written
-    }
-
-    /// Return a compact debug snapshot of internal state.
-    ///
-    /// Params: none.
-    /// Returns: leading IIR/FIR/delay state words for runtime comparison.
-    pub(super) fn debug_snapshot(&self) -> ([i32; 6], [i16; 8], [i16; 8]) {
-        let mut fir = [0i16; 8];
-        fir.copy_from_slice(&self.s_fir[..8]);
-        let mut delay = [0i16; 8];
-        delay.copy_from_slice(&self.delay_buf[..8]);
-        (self.s_iir, fir, delay)
     }
 
     /// Return the number of output samples for a given input length.
@@ -207,79 +154,4 @@ impl SilkResampler {
 /// Returns: signed Q16-scaled product.
 fn smulww(a32: i32, b32: i32) -> i32 {
     ((a32 as i64 * b32 as i64) >> 16) as i32
-}
-
-/// Return the next traced resampler call index when tracing is enabled.
-///
-/// Params: none.
-/// Returns: `Some(call_idx)` for the first ten traced calls, otherwise `None`.
-fn resampler_debug_call_index() -> Option<usize> {
-    if std::env::var("OPUS_RESAMP_TRACE").ok().as_deref() != Some("1") {
-        return None;
-    }
-    let call_idx = RESAMPLER_DEBUG_CALLS.fetch_add(1, Ordering::Relaxed);
-    (call_idx < 10).then_some(call_idx)
-}
-
-/// Sum absolute PCM magnitudes for a slice.
-///
-/// Params: immutable PCM `samples`.
-/// Returns: sum of absolute values as `i64`.
-fn abs_sum_i16(samples: &[i16]) -> i64 {
-    samples.iter().map(|&sample| i64::from(sample).abs()).sum()
-}
-
-/// Append one NDJSON debug record for a traced resampler call.
-///
-/// Params: source `location`, log `message`, debug `run_id`, `hypothesis_id`, call metadata,
-/// summed magnitudes, first up2 samples, and IIR state snapshots.
-/// Returns: nothing; best-effort append to the session log file.
-fn append_resampler_debug_log(
-    location: &str,
-    message: &str,
-    run_id: &str,
-    hypothesis_id: &str,
-    call_idx: usize,
-    stage: &str,
-    input_len: usize,
-    output_len: usize,
-    input_abs_sum: i64,
-    up2_abs_sum: i64,
-    output_abs_sum: i64,
-    up2_first4: [i16; 4],
-    s_iir_before: [i32; 6],
-    s_iir_after: [i32; 6],
-) {
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(RESAMPLER_DEBUG_LOG_PATH)
-    else {
-        return;
-    };
-    let _ = writeln!(
-        file,
-        "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"timestamp\":{},\"data\":{{\"callIdx\":{},\"stage\":\"{}\",\"inputLen\":{},\"outputLen\":{},\"inputAbs\":{},\"afterUp2Abs\":{},\"outAbs\":{},\"up2First4\":{:?},\"sIirBefore\":{:?},\"sIirAfter\":{:?}}}}}",
-        RESAMPLER_DEBUG_SESSION_ID,
-        run_id,
-        hypothesis_id,
-        location,
-        message,
-        {
-            let now = std::time::SystemTime::now();
-            now.duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0)
-        },
-        call_idx,
-        stage,
-        input_len,
-        output_len,
-        input_abs_sum,
-        up2_abs_sum,
-        output_abs_sum,
-        up2_first4,
-        s_iir_before,
-        s_iir_after,
-    );
 }

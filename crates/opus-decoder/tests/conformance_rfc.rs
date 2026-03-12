@@ -1,4 +1,4 @@
-#![allow(unused_variables, unused_assignments)]
+#![allow(unused_variables, unused_assignments, clippy::collapsible_if)]
 
 use std::fs;
 use std::io::{self, Read};

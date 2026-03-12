@@ -73,7 +73,7 @@ pub(super) fn ms_to_lr(
     side: &mut [i16],
     pred_q13: [i32; 2],
     fs_khz: u32,
-    packet_idx: usize,
+    _packet_idx: usize,
 ) {
     let frame_length = mid.len();
     debug_assert_eq!(side.len(), frame_length);
@@ -101,28 +101,9 @@ pub(super) fn ms_to_lr(
     for n in 0..interp_len {
         pred0_q13 += delta0_q13;
         pred1_q13 += delta1_q13;
-        let mut sum = ((x1[n] as i32 + x1[n + 2] as i32 + ((x1[n + 1] as i32) << 1)) << 9) as i32;
+        let mut sum = (x1[n] as i32 + x1[n + 2] as i32 + ((x1[n + 1] as i32) << 1)) << 9;
         let sum_after_pred0 = smlawb((x2[n + 1] as i32) << 8, sum, pred0_q13);
         let sum_after_pred1 = smlawb(sum_after_pred0, (x1[n + 1] as i32) << 11, pred1_q13);
-        if packet_idx == 0 && n == 49 {
-            // #region agent log H42
-            eprintln!(
-                "DBG H42 rust pkt0 n49 interp x1n={} x1n1={} x1n2={} x2n1_in={} pred0={} pred1={} delta0={} delta1={} sum_q11={} after_pred0_q8={} after_pred1_q8={} side_out={}",
-                x1[n],
-                x1[n + 1],
-                x1[n + 2],
-                x2[n + 1],
-                pred0_q13,
-                pred1_q13,
-                delta0_q13,
-                delta1_q13,
-                sum,
-                sum_after_pred0,
-                sum_after_pred1,
-                sat16(rshift_round(sum_after_pred1, 8))
-            );
-            // #endregion
-        }
         sum = sum_after_pred1;
         x2[n + 1] = sat16(rshift_round(sum, 8));
     }
@@ -130,7 +111,7 @@ pub(super) fn ms_to_lr(
     pred0_q13 = pred_q13[0];
     pred1_q13 = pred_q13[1];
     for n in interp_len..frame_length {
-        let mut sum = ((x1[n] as i32 + x1[n + 2] as i32 + ((x1[n + 1] as i32) << 1)) << 9) as i32;
+        let mut sum = (x1[n] as i32 + x1[n + 2] as i32 + ((x1[n + 1] as i32) << 1)) << 9;
         sum = smlawb((x2[n + 1] as i32) << 8, sum, pred0_q13);
         sum = smlawb(sum, (x1[n + 1] as i32) << 11, pred1_q13);
         x2[n + 1] = sat16(rshift_round(sum, 8));
