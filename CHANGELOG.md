@@ -8,6 +8,13 @@
   `thiserror`); added `//!` module-level doc comments to `lib.rs`, `celt/mod.rs`,
   `silk/mod.rs`, `entropy.rs`; all mechanical clippy warnings resolved
   (`-D warnings` clean). RFC conformance: 12/12 vectors still PASS.
+- feat(plc): CELT PLC (`CeltDecoder::decode_lost()`) reusing `prev_energy`,
+  `decode_mem`, overlap and deemphasis buffers; noise injection with per-loss
+  fade-out (~-6dB/frame, capped at 5). SILK/Hybrid loss path: safe silence/fade
+  fallback (TODO: replace with `silk_PLC_conceal()` pitch extrapolation in Phase 5b).
+  `OpusDecoder::{decode, decode_float}` handle `packet=[]` and `fec=true` as PLC;
+  `Decoder` tracks `loss_count`, `last_packet_duration`. Added `plc_smoke_test`
+  (ignored) on testvector07. Clippy clean, RFC conformance: 12/12 PASS.
 
 ## 2026-03-09
 

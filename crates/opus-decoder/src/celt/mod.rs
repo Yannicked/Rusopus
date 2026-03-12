@@ -85,6 +85,7 @@ pub(crate) struct CeltDecoder {
     final_range: u32,
     rng_seed: u32,
     last_split_count: usize,
+    loss_count: u32,
 }
 
 impl CeltDecoder {
@@ -121,6 +122,7 @@ impl CeltDecoder {
             final_range: 0,
             rng_seed: 0,
             last_split_count: 0,
+            loss_count: 0,
         }
     }
 
@@ -147,6 +149,195 @@ impl CeltDecoder {
         self.rng_seed = 0;
         self.last_split_count = 0;
         self.start_band = 0;
+        self.loss_count = 0;
+    }
+
+    /// Clear CELT PLC loss history before a good decode.
+    ///
+    /// Params: none.
+    /// Returns: nothing.
+    pub fn reset_loss_count(&mut self) {
+        self.loss_count = 0;
+    }
+
+    /// Derive the highest active CELT band from saved energy history.
+    ///
+    /// Params: active output `channels`.
+    /// Returns: exclusive upper band index for PLC shaping.
+    fn plc_end_band(&self, channels: usize) -> usize {
+        let active_channels = channels.clamp(1, 2);
+        let nb_ebands = self.mode.nb_ebands;
+        for band in (0..nb_ebands).rev() {
+            for ch in 0..active_channels {
+                if self.prev_energy[ch * nb_ebands + band] > LOG_ENERGY_FLOOR_DB {
+                    return band + 1;
+                }
+            }
+        }
+        0
+    }
+
+    /// Called when a CELT packet is lost (packet=[] or fec path).
+    ///
+    /// Params: per-channel `frame_size` and output `channels`.
+    /// Returns: interleaved concealed floating PCM.
+    pub fn decode_lost(&mut self, frame_size: usize, channels: usize) -> Vec<f32> {
+        let active_channels = channels.clamp(1, self.channels as usize).min(2);
+        let mut pcm = vec![0.0f32; frame_size * active_channels];
+        let lm = match frame_size {
+            120 => 0,
+            240 => 1,
+            480 => 2,
+            960 => 3,
+            _ => return pcm,
+        };
+
+        let nb_ebands = self.mode.nb_ebands;
+        let end = self.plc_end_band(active_channels);
+        if end == 0 {
+            self.loss_count = self.loss_count.saturating_add(1);
+            return pcm;
+        }
+
+        let mut left_energy = self.prev_energy[..nb_ebands].to_vec();
+        let mut right_energy = if active_channels == 2 {
+            self.prev_energy[nb_ebands..2 * nb_ebands].to_vec()
+        } else {
+            left_energy.clone()
+        };
+        if self.loss_count > 0 {
+            for band in 0..end {
+                left_energy[band] = (left_energy[band] - 6.0).max(self.background_log_energy[band]);
+                if active_channels == 2 {
+                    right_energy[band] = (right_energy[band] - 6.0)
+                        .max(self.background_log_energy[nb_ebands + band]);
+                }
+            }
+        }
+        for band in end..nb_ebands {
+            left_energy[band] = LOG_ENERGY_FLOOR_DB;
+            right_energy[band] = LOG_ENERGY_FLOOR_DB;
+        }
+
+        let mut mdct_left = vec![0.0f32; frame_size];
+        for band in 0..end {
+            let start = (self.mode.e_bands[band] as usize) << lm;
+            let band_len =
+                (self.mode.e_bands[band + 1] as usize - self.mode.e_bands[band] as usize) << lm;
+            for value in &mut mdct_left[start..start + band_len] {
+                self.rng_seed = bands::celt_lcg_rand(self.rng_seed);
+                *value = ((self.rng_seed >> 16) as i16) as f32;
+            }
+            vq::renormalise_vector(&mut mdct_left[start..start + band_len], 1.0);
+        }
+        let mut denorm_left = vec![0.0f32; frame_size];
+        bands::denormalise_bands(
+            self.mode,
+            &mdct_left,
+            &mut denorm_left,
+            &left_energy,
+            0,
+            end,
+            lm,
+            false,
+        );
+        if Self::synthesise_channel_to_mem(
+            &denorm_left,
+            frame_size,
+            lm,
+            false,
+            self.mode.window,
+            self.mode.overlap,
+            &self.mdct,
+            &self.mdct_480,
+            &self.mdct_240,
+            &self.mdct_short,
+            &mut self.decode_mem,
+        )
+        .is_err()
+        {
+            return pcm;
+        }
+
+        if active_channels == 2 {
+            let mut mdct_right = vec![0.0f32; frame_size];
+            for band in 0..end {
+                let start = (self.mode.e_bands[band] as usize) << lm;
+                let band_len =
+                    (self.mode.e_bands[band + 1] as usize - self.mode.e_bands[band] as usize) << lm;
+                for value in &mut mdct_right[start..start + band_len] {
+                    self.rng_seed = bands::celt_lcg_rand(self.rng_seed);
+                    *value = ((self.rng_seed >> 16) as i16) as f32;
+                }
+                vq::renormalise_vector(&mut mdct_right[start..start + band_len], 1.0);
+            }
+            let mut denorm_right = vec![0.0f32; frame_size];
+            bands::denormalise_bands(
+                self.mode,
+                &mdct_right,
+                &mut denorm_right,
+                &right_energy,
+                0,
+                end,
+                lm,
+                false,
+            );
+            if Self::synthesise_channel_to_mem(
+                &denorm_right,
+                frame_size,
+                lm,
+                false,
+                self.mode.window,
+                self.mode.overlap,
+                &self.mdct,
+                &self.mdct_480,
+                &self.mdct_240,
+                &self.mdct_short,
+                &mut self.decode_mem_right,
+            )
+            .is_err()
+            {
+                return pcm;
+            }
+        }
+
+        self.postfilter_period = 0;
+        self.postfilter_period_old = 0;
+        self.postfilter_gain = 0.0;
+        self.postfilter_gain_old = 0.0;
+        self.postfilter_tapset = 0;
+        self.postfilter_tapset_old = 0;
+        self.old_log_energy2[..nb_ebands].copy_from_slice(&self.old_log_energy[..nb_ebands]);
+        self.old_log_energy[..nb_ebands].copy_from_slice(&left_energy);
+        self.prev_energy[..nb_ebands].copy_from_slice(&left_energy);
+        self.old_log_energy2[nb_ebands..2 * nb_ebands]
+            .copy_from_slice(&self.old_log_energy[nb_ebands..2 * nb_ebands]);
+        if active_channels == 2 {
+            self.old_log_energy[nb_ebands..2 * nb_ebands].copy_from_slice(&right_energy);
+            self.prev_energy[nb_ebands..2 * nb_ebands].copy_from_slice(&right_energy);
+        } else {
+            self.old_log_energy[nb_ebands..2 * nb_ebands].copy_from_slice(&left_energy);
+            self.prev_energy[nb_ebands..2 * nb_ebands].copy_from_slice(&left_energy);
+        }
+
+        let out_start = Self::out_start(frame_size);
+        let mut left = self.decode_mem[out_start..out_start + frame_size].to_vec();
+        self.apply_deemph(0, &mut left);
+        for i in 0..frame_size {
+            pcm[i * active_channels] = left[i];
+        }
+        if active_channels == 2 {
+            let mut right = self.decode_mem_right[out_start..out_start + frame_size].to_vec();
+            self.apply_deemph(1, &mut right);
+            for i in 0..frame_size {
+                pcm[i * 2 + 1] = right[i];
+            }
+        }
+
+        self.final_range = 0;
+        self.last_split_count = 0;
+        self.loss_count = self.loss_count.saturating_add(1);
+        pcm
     }
 
     /// Return CELT range coder final state.

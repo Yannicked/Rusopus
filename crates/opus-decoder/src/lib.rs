@@ -32,6 +32,8 @@ static TRACE_DECODE_PACKET_IDX: AtomicUsize = AtomicUsize::new(0);
 pub struct OpusDecoder {
     decoder: Decoder,
     float_scratch: Vec<i16>,
+    loss_count: u32,
+    last_packet_duration: usize,
 }
 
 impl OpusDecoder {
@@ -48,7 +50,18 @@ impl OpusDecoder {
         Ok(Self {
             decoder,
             float_scratch: Vec::new(),
+            loss_count: 0,
+            last_packet_duration: 0,
         })
+    }
+
+    /// Mirror internal PLC bookkeeping into the public wrapper.
+    ///
+    /// Parameters: none.
+    /// Returns: nothing.
+    fn sync_state_from_decoder(&mut self) {
+        self.loss_count = self.decoder.loss_count;
+        self.last_packet_duration = self.decoder.last_packet_duration;
     }
 
     /// Decode a packet into 16-bit PCM samples (interleaved if stereo).
@@ -61,13 +74,15 @@ impl OpusDecoder {
         pcm: &mut [i16],
         fec: bool,
     ) -> Result<usize, OpusError> {
-        if fec {
-            return Err(OpusError::InternalError);
-        }
-
-        self.decoder
-            .decode(Some(packet), pcm)
-            .map_err(OpusError::from)
+        let samples_per_channel = if packet.is_empty() || fec {
+            self.decoder.decode(None, pcm).map_err(OpusError::from)?
+        } else {
+            self.decoder
+                .decode(Some(packet), pcm)
+                .map_err(OpusError::from)?
+        };
+        self.sync_state_from_decoder();
+        Ok(samples_per_channel)
     }
 
     /// Decode a packet into f32 PCM samples (interleaved if stereo).
@@ -80,13 +95,14 @@ impl OpusDecoder {
         pcm: &mut [f32],
         fec: bool,
     ) -> Result<usize, OpusError> {
-        if fec {
-            return Err(OpusError::InternalError);
-        }
-
-        let parsed = packet::parse_packet(packet).map_err(OpusError::from)?;
-        let needed =
-            parsed.samples_per_channel(self.decoder.fs_hz()) * self.decoder.channels() as usize;
+        let samples_per_channel_hint = if packet.is_empty() || fec {
+            self.decoder.last_packet_duration
+        } else {
+            packet::parse_packet(packet)
+                .map_err(OpusError::from)?
+                .samples_per_channel(self.decoder.fs_hz())
+        };
+        let needed = samples_per_channel_hint * self.decoder.channels() as usize;
         if pcm.len() < needed {
             return Err(OpusError::BufferTooSmall);
         }
@@ -97,8 +113,16 @@ impl OpusDecoder {
 
         let samples_per_channel = self
             .decoder
-            .decode(Some(packet), &mut self.float_scratch[..needed])
+            .decode(
+                if packet.is_empty() || fec {
+                    None
+                } else {
+                    Some(packet)
+                },
+                &mut self.float_scratch[..needed],
+            )
             .map_err(OpusError::from)?;
+        self.sync_state_from_decoder();
         let written = samples_per_channel * self.decoder.channels() as usize;
         for (dst, src) in pcm.iter_mut().zip(self.float_scratch[..written].iter()) {
             *dst = f32::from(*src) / 32768.0;
@@ -113,6 +137,8 @@ impl OpusDecoder {
     /// Returns: nothing.
     pub fn reset(&mut self) {
         self.decoder.reset();
+        self.loss_count = 0;
+        self.last_packet_duration = 0;
     }
 }
 
@@ -152,6 +178,9 @@ pub struct Decoder {
     last_celt_to_silk: bool,
     prev_mode: Option<OpusMode>,
     prev_redundancy: bool,
+    loss_count: u32,
+    last_packet_duration: usize,
+    last_output: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +211,9 @@ impl Decoder {
             last_celt_to_silk: false,
             prev_mode: None,
             prev_redundancy: false,
+            loss_count: 0,
+            last_packet_duration: 0,
+            last_output: Vec::new(),
         })
     }
 
@@ -206,6 +238,79 @@ impl Decoder {
         }
     }
 
+    /// Conceal a lost non-CELT frame by fading the previous PCM.
+    ///
+    /// Params: per-channel `frame_size`, consecutive `loss_count`, and mutable `out`.
+    /// Returns: nothing; `out` receives interleaved concealed PCM.
+    fn conceal_with_fade(&self, frame_size: usize, loss_count: u32, out: &mut [i16]) {
+        let channels = self.channels as usize;
+        let needed = frame_size * channels;
+        if self.last_output.len() < needed {
+            out[..needed].fill(0);
+            return;
+        }
+
+        let fade = 0.9f32.powi((loss_count.min(10) + 1) as i32);
+        for (dst, src) in out[..needed]
+            .iter_mut()
+            .zip(self.last_output[..needed].iter())
+        {
+            let sample = f32::from(*src) * fade;
+            *dst = sample.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+    }
+
+    /// Persist the most recent decoded interleaved PCM frame.
+    ///
+    /// Params: decoded `out` buffer and `samples_per_channel` written into it.
+    /// Returns: nothing; the decoder keeps a copy for future PLC fallback.
+    fn store_last_output(&mut self, out: &[i16], samples_per_channel: usize) {
+        let written = samples_per_channel * self.channels as usize;
+        self.last_output.clear();
+        self.last_output.extend_from_slice(&out[..written]);
+    }
+
+    /// Decode a lost packet using CELT PLC or a safe fade fallback.
+    ///
+    /// Params: mutable interleaved `out` buffer.
+    /// Returns: concealed sample count per channel.
+    fn decode_lost_packet(&mut self, out: &mut [i16]) -> Result<usize, Error> {
+        let samples_per_channel = self.last_packet_duration;
+        if samples_per_channel == 0 {
+            self.last_final_range = 0;
+            return Ok(0);
+        }
+
+        let needed = samples_per_channel * self.channels as usize;
+        if out.len() < needed {
+            return Err(Error::OutputTooSmall {
+                needed,
+                got: out.len(),
+            });
+        }
+
+        out[..needed].fill(0);
+        if matches!(self.prev_mode, Some(OpusMode::CeltOnly)) && self.fs_hz == 48_000 {
+            let concealed = self
+                .celt
+                .decode_lost(samples_per_channel, self.channels as usize);
+            for (dst, src) in out[..needed].iter_mut().zip(concealed.iter()) {
+                *dst = src.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            }
+        } else {
+            self.conceal_with_fade(samples_per_channel, self.loss_count, out);
+        }
+
+        self.loss_count = self.loss_count.saturating_add(1);
+        self.last_packet_split_count = 0;
+        self.last_final_range = 0;
+        self.last_had_redundancy = false;
+        self.last_celt_to_silk = false;
+        self.prev_redundancy = false;
+        self.store_last_output(out, samples_per_channel);
+        Ok(samples_per_channel)
+    }
+
     pub fn reset(&mut self) {
         // Placeholder. The real implementation will reset SILK/CELT state.
         self.celt.reset();
@@ -216,6 +321,9 @@ impl Decoder {
         self.last_celt_to_silk = false;
         self.prev_mode = None;
         self.prev_redundancy = false;
+        self.loss_count = 0;
+        self.last_packet_duration = 0;
+        self.last_output.clear();
     }
 
     /// Return range coder final state for conformance comparison.
@@ -270,7 +378,7 @@ impl Decoder {
                 let pp = packet::parse_packet(packet)?;
                 (Some(pp.toc), pp.samples_per_channel(self.fs_hz))
             }
-            None => (None, self.max_frame_size_per_channel()),
+            None => (None, self.last_packet_duration),
         };
 
         let needed = samples_per_channel_needed * self.channels as usize;
@@ -282,10 +390,10 @@ impl Decoder {
         }
 
         let Some(toc) = toc else {
-            // PLC not implemented yet.
-            return Err(Error::NotImplemented);
+            return self.decode_lost_packet(out);
         };
 
+        self.celt.reset_loss_count();
         let config = (toc >> 3) & 0x1f;
         let mode = match config {
             0..=11 => OpusMode::SilkOnly,
@@ -572,6 +680,9 @@ impl Decoder {
         self.last_had_redundancy = had_redundancy;
         self.last_celt_to_silk = last_celt_to_silk;
         self.prev_redundancy = had_redundancy;
+        self.loss_count = 0;
+        self.last_packet_duration = written_per_channel;
+        self.store_last_output(out, written_per_channel);
         Ok(written_per_channel)
     }
 }

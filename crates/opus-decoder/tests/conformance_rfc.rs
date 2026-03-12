@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use opus_decoder::{Decoder, Error};
+use opus_decoder::{Decoder, Error, OpusDecoder};
 
 #[derive(Debug)]
 struct Vector {
@@ -65,6 +65,108 @@ fn rfc_conformance_vectors() {
             manifest_path.display()
         );
     }
+}
+
+/// Exercise public PLC entry points on a CELT vector without asserting bit-exact output.
+///
+/// Params: none.
+/// Returns: nothing; panics on invalid PLC behavior.
+#[test]
+#[ignore = "manual PLC smoke test"]
+fn plc_smoke_test() {
+    let bit_path = vectors_dir().join("testvector07.bit");
+    let packets = read_opus_demo_stream(&bit_path).expect("failed to read testvector07.bit");
+    let payloads: Vec<&[u8]> = packets
+        .iter()
+        .filter_map(|packet| packet.packet.as_deref())
+        .collect();
+    assert!(
+        payloads.len() >= 20,
+        "need at least 20 packets for PLC smoke test"
+    );
+
+    let mut decoder_i16 = OpusDecoder::new(48_000, 1).expect("failed to create i16 decoder");
+    let mut decoder_f32 = OpusDecoder::new(48_000, 1).expect("failed to create f32 decoder");
+    let mut pcm_i16 = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
+    let mut pcm_f32 = vec![0.0f32; Decoder::MAX_FRAME_SIZE_48K];
+    let mut last_good_rms = 0.0f64;
+    let mut last_loss_rms = 0.0f64;
+
+    for (frame_idx, packet) in payloads.iter().take(10).enumerate() {
+        let samples_i16 = decoder_i16
+            .decode(packet, &mut pcm_i16, false)
+            .expect("normal i16 decode failed");
+        let samples_f32 = decoder_f32
+            .decode_float(packet, &mut pcm_f32, false)
+            .expect("normal f32 decode failed");
+        assert_eq!(samples_i16, samples_f32);
+        assert!(
+            pcm_f32[..samples_f32]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
+        last_good_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
+        eprintln!("pre-loss frame {frame_idx} rms={last_good_rms:.6}");
+    }
+
+    for loss_idx in 0..3 {
+        let samples_i16 = decoder_i16
+            .decode(&[], &mut pcm_i16, false)
+            .expect("PLC i16 decode failed");
+        let samples_f32 = decoder_f32
+            .decode_float(&[], &mut pcm_f32, false)
+            .expect("PLC f32 decode failed");
+        assert_eq!(samples_i16, samples_f32);
+        assert!(samples_f32 > 0, "PLC should reuse the last packet duration");
+        assert!(
+            pcm_f32[..samples_f32]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
+        last_loss_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
+        eprintln!("loss frame {loss_idx} rms={last_loss_rms:.6}");
+    }
+
+    assert!(
+        last_loss_rms < last_good_rms,
+        "PLC should fade out over repeated losses"
+    );
+
+    for (frame_idx, packet) in payloads.iter().skip(10).take(10).enumerate() {
+        let samples_i16 = decoder_i16
+            .decode(packet, &mut pcm_i16, false)
+            .expect("post-loss i16 decode failed");
+        let samples_f32 = decoder_f32
+            .decode_float(packet, &mut pcm_f32, false)
+            .expect("post-loss f32 decode failed");
+        assert_eq!(samples_i16, samples_f32);
+        assert!(
+            pcm_f32[..samples_f32]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
+        let rms = frame_rms_f32(&pcm_f32[..samples_f32]);
+        eprintln!("post-loss frame {frame_idx} rms={rms:.6}");
+    }
+}
+
+/// Compute root-mean-square amplitude for one floating PCM frame.
+///
+/// Params: decoded floating-point `frame`.
+/// Returns: RMS amplitude as `f64`.
+fn frame_rms_f32(frame: &[f32]) -> f64 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+
+    let sum_sq = frame
+        .iter()
+        .map(|sample| {
+            let sample = f64::from(*sample);
+            sample * sample
+        })
+        .sum::<f64>();
+    (sum_sq / frame.len() as f64).sqrt()
 }
 
 fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::Error>> {
