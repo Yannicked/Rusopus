@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+- bench: added `crates/bench-compare/` crate with FFI wrapper around libopus C
+  (`opus_decode`) and criterion benchmarks comparing Rust vs C on CELT/SILK/Hybrid.
+  Baseline results (correctness-first, no optimization):
+  CELT mono 48k: Rust 803ms vs C 20.3ms (~40x);
+  SILK NB 8k: Rust 10.3ms vs C 7.4ms (~1.4x);
+  Hybrid FB 48k: Rust 2.16s vs C 35.2ms (~61x).
+  SILK nearly matches C; CELT/Hybrid gap expected — libopus uses SIMD and
+  hand-optimized float paths not yet present in rasopus.
+  Commit: bench-compare baseline.
+
 ## [0.1.0] - 2026-03-12
 
 ### Added
