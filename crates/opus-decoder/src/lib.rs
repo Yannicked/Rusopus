@@ -290,15 +290,22 @@ impl Decoder {
         }
 
         out[..needed].fill(0);
-        if matches!(self.prev_mode, Some(OpusMode::CeltOnly)) && self.fs_hz == 48_000 {
-            let concealed = self
-                .celt
-                .decode_lost(samples_per_channel, self.channels as usize);
-            for (dst, src) in out[..needed].iter_mut().zip(concealed.iter()) {
-                *dst = src.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        match self.prev_mode {
+            Some(OpusMode::CeltOnly) if self.fs_hz == 48_000 => {
+                let concealed = self
+                    .celt
+                    .decode_lost(samples_per_channel, self.channels as usize);
+                for (dst, src) in out[..needed].iter_mut().zip(concealed.iter()) {
+                    *dst = src.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                }
             }
-        } else {
-            self.conceal_with_fade(samples_per_channel, self.loss_count, out);
+            Some(OpusMode::SilkOnly | OpusMode::Hybrid) => {
+                self.silk
+                    .decode_lost(samples_per_channel, out, self.loss_count)?;
+            }
+            _ => {
+                self.conceal_with_fade(samples_per_channel, self.loss_count, out);
+            }
         }
 
         self.loss_count = self.loss_count.saturating_add(1);

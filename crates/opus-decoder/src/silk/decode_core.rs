@@ -4,6 +4,7 @@
 use super::gain;
 use super::ltp;
 use super::pitch;
+use super::plc::SilkPlcState;
 use super::tables::{
     LTP_MEM_LENGTH_MS, LTP_ORDER, MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_NB_SUBFR,
     MAX_SUB_FRAME_LENGTH, QUANT_LEVEL_ADJUST_Q10, QUANTIZATION_OFFSETS_Q10,
@@ -63,6 +64,8 @@ pub(super) struct SilkChannelState {
     pub s_lpc_q14_buf: [i32; MAX_LPC_ORDER],
     /// Output buffer kept for future voiced re-whitening.
     pub out_buf: [i16; MAX_FRAME_LENGTH + 2 * MAX_SUB_FRAME_LENGTH],
+    /// PLC state refreshed after every successful decode.
+    pub plc: SilkPlcState,
 }
 
 impl Default for SilkChannelState {
@@ -78,6 +81,7 @@ impl Default for SilkChannelState {
             lag_prev: 100,
             s_lpc_q14_buf: [0; MAX_LPC_ORDER],
             out_buf: [0; MAX_FRAME_LENGTH + 2 * MAX_SUB_FRAME_LENGTH],
+            plc: SilkPlcState::default(),
         }
     }
 }

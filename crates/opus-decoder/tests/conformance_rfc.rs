@@ -74,31 +74,31 @@ fn rfc_conformance_vectors() {
 #[test]
 #[ignore = "manual PLC smoke test"]
 fn plc_smoke_test() {
-    let bit_path = vectors_dir().join("testvector07.bit");
-    let packets = read_opus_demo_stream(&bit_path).expect("failed to read testvector07.bit");
-    let payloads: Vec<&[u8]> = packets
+    let celt_path = vectors_dir().join("testvector07.bit");
+    let celt_packets = read_opus_demo_stream(&celt_path).expect("failed to read testvector07.bit");
+    let celt_payloads: Vec<&[u8]> = celt_packets
         .iter()
         .filter_map(|packet| packet.packet.as_deref())
         .collect();
     assert!(
-        payloads.len() >= 20,
-        "need at least 20 packets for PLC smoke test"
+        celt_payloads.len() >= 20,
+        "need at least 20 CELT packets for PLC smoke test"
     );
 
-    let mut decoder_i16 = OpusDecoder::new(48_000, 1).expect("failed to create i16 decoder");
-    let mut decoder_f32 = OpusDecoder::new(48_000, 1).expect("failed to create f32 decoder");
+    let mut decoder_i16 = OpusDecoder::new(48_000, 1).expect("failed to create CELT i16 decoder");
+    let mut decoder_f32 = OpusDecoder::new(48_000, 1).expect("failed to create CELT f32 decoder");
     let mut pcm_i16 = vec![0i16; Decoder::MAX_FRAME_SIZE_48K];
     let mut pcm_f32 = vec![0.0f32; Decoder::MAX_FRAME_SIZE_48K];
     let mut last_good_rms = 0.0f64;
     let mut last_loss_rms = 0.0f64;
 
-    for (frame_idx, packet) in payloads.iter().take(10).enumerate() {
+    for (frame_idx, packet) in celt_payloads.iter().take(10).enumerate() {
         let samples_i16 = decoder_i16
             .decode(packet, &mut pcm_i16, false)
-            .expect("normal i16 decode failed");
+            .expect("normal CELT i16 decode failed");
         let samples_f32 = decoder_f32
             .decode_float(packet, &mut pcm_f32, false)
-            .expect("normal f32 decode failed");
+            .expect("normal CELT f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
         assert!(
             pcm_f32[..samples_f32]
@@ -106,16 +106,16 @@ fn plc_smoke_test() {
                 .all(|sample| sample.is_finite())
         );
         last_good_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
-        eprintln!("pre-loss frame {frame_idx} rms={last_good_rms:.6}");
+        eprintln!("celt pre-loss frame {frame_idx} rms={last_good_rms:.6}");
     }
 
     for loss_idx in 0..3 {
         let samples_i16 = decoder_i16
             .decode(&[], &mut pcm_i16, false)
-            .expect("PLC i16 decode failed");
+            .expect("CELT PLC i16 decode failed");
         let samples_f32 = decoder_f32
             .decode_float(&[], &mut pcm_f32, false)
-            .expect("PLC f32 decode failed");
+            .expect("CELT PLC f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
         assert!(samples_f32 > 0, "PLC should reuse the last packet duration");
         assert!(
@@ -124,21 +124,21 @@ fn plc_smoke_test() {
                 .all(|sample| sample.is_finite())
         );
         last_loss_rms = frame_rms_f32(&pcm_f32[..samples_f32]);
-        eprintln!("loss frame {loss_idx} rms={last_loss_rms:.6}");
+        eprintln!("celt loss frame {loss_idx} rms={last_loss_rms:.6}");
     }
 
     assert!(
         last_loss_rms < last_good_rms,
-        "PLC should fade out over repeated losses"
+        "CELT PLC should fade out over repeated losses"
     );
 
-    for (frame_idx, packet) in payloads.iter().skip(10).take(10).enumerate() {
+    for (frame_idx, packet) in celt_payloads.iter().skip(10).take(10).enumerate() {
         let samples_i16 = decoder_i16
             .decode(packet, &mut pcm_i16, false)
-            .expect("post-loss i16 decode failed");
+            .expect("post-loss CELT i16 decode failed");
         let samples_f32 = decoder_f32
             .decode_float(packet, &mut pcm_f32, false)
-            .expect("post-loss f32 decode failed");
+            .expect("post-loss CELT f32 decode failed");
         assert_eq!(samples_i16, samples_f32);
         assert!(
             pcm_f32[..samples_f32]
@@ -146,7 +146,90 @@ fn plc_smoke_test() {
                 .all(|sample| sample.is_finite())
         );
         let rms = frame_rms_f32(&pcm_f32[..samples_f32]);
-        eprintln!("post-loss frame {frame_idx} rms={rms:.6}");
+        eprintln!("celt post-loss frame {frame_idx} rms={rms:.6}");
+    }
+
+    let silk_path = vectors_dir().join("testvector02.bit");
+    let silk_packets = read_opus_demo_stream(&silk_path).expect("failed to read testvector02.bit");
+    let silk_payloads: Vec<&[u8]> = silk_packets
+        .iter()
+        .filter_map(|packet| packet.packet.as_deref())
+        .collect();
+    assert!(
+        silk_payloads.len() >= 20,
+        "need at least 20 SILK packets for PLC smoke test"
+    );
+
+    let mut silk_decoder_i16 =
+        OpusDecoder::new(48_000, 2).expect("failed to create SILK i16 decoder");
+    let mut silk_decoder_f32 =
+        OpusDecoder::new(48_000, 2).expect("failed to create SILK f32 decoder");
+    let mut silk_pcm_i16 = vec![0i16; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut silk_pcm_f32 = vec![0.0f32; Decoder::MAX_FRAME_SIZE_48K * 2];
+    let mut silk_loss_rms = Vec::new();
+
+    for (frame_idx, packet) in silk_payloads.iter().take(10).enumerate() {
+        let samples_i16 = silk_decoder_i16
+            .decode(packet, &mut silk_pcm_i16, false)
+            .expect("normal SILK i16 decode failed");
+        let samples_f32 = silk_decoder_f32
+            .decode_float(packet, &mut silk_pcm_f32, false)
+            .expect("normal SILK f32 decode failed");
+        assert_eq!(samples_i16, samples_f32);
+        assert!(
+            silk_pcm_f32[..samples_f32 * 2]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
+        let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
+        eprintln!("silk pre-loss frame {frame_idx} rms={rms:.6}");
+    }
+
+    for loss_idx in 0..5 {
+        let samples_i16 = silk_decoder_i16
+            .decode(&[], &mut silk_pcm_i16, false)
+            .expect("SILK PLC i16 decode failed");
+        let samples_f32 = silk_decoder_f32
+            .decode_float(&[], &mut silk_pcm_f32, false)
+            .expect("SILK PLC f32 decode failed");
+        assert_eq!(samples_i16, samples_f32);
+        assert!(
+            samples_f32 > 0,
+            "SILK PLC should reuse the last packet duration"
+        );
+        assert!(
+            silk_pcm_f32[..samples_f32 * 2]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
+        let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
+        assert!(rms > 0.0, "SILK PLC should not output silence");
+        silk_loss_rms.push(rms);
+        eprintln!("silk loss frame {loss_idx} rms={rms:.6}");
+    }
+
+    for pair in silk_loss_rms.windows(2) {
+        assert!(
+            pair[1] <= pair[0] + 1e-9,
+            "SILK PLC RMS should decay monotonically over consecutive losses"
+        );
+    }
+
+    for (frame_idx, packet) in silk_payloads.iter().skip(10).take(10).enumerate() {
+        let samples_i16 = silk_decoder_i16
+            .decode(packet, &mut silk_pcm_i16, false)
+            .expect("post-loss SILK i16 decode failed");
+        let samples_f32 = silk_decoder_f32
+            .decode_float(packet, &mut silk_pcm_f32, false)
+            .expect("post-loss SILK f32 decode failed");
+        assert_eq!(samples_i16, samples_f32);
+        assert!(
+            silk_pcm_f32[..samples_f32 * 2]
+                .iter()
+                .all(|sample| sample.is_finite())
+        );
+        let rms = frame_rms_f32(&silk_pcm_f32[..samples_f32 * 2]);
+        eprintln!("silk post-loss frame {frame_idx} rms={rms:.6}");
     }
 }
 

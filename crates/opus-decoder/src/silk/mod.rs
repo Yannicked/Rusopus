@@ -15,6 +15,7 @@ mod lpc;
 mod ltp;
 mod nlsf;
 mod pitch;
+mod plc;
 mod resampler;
 mod resampler_private;
 mod resampler_rom;
@@ -24,6 +25,7 @@ mod tables;
 const MAX_INTERNAL_FRAMES: usize = 3;
 const MAX_LPC_HALVES: usize = 2;
 const MAX_API_FRAME_SAMPLES_48K: usize = 960 * MAX_INTERNAL_FRAMES;
+const TYPE_VOICED: i32 = 2;
 
 /// Result of decoding one SILK Opus frame.
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +120,170 @@ impl SilkDecoder {
     /// Returns: `final_range` value for conformance checks.
     pub fn final_range(&self) -> u32 {
         self.final_range
+    }
+
+    /// Update the per-channel rewhitening history after PLC synthesis.
+    ///
+    /// Params: mutable channel `state`, concealed internal `frame`, and internal `fs_khz`.
+    /// Returns: nothing; the history buffers are refreshed in place.
+    fn refresh_conceal_history(
+        out_buf: &mut [i16],
+        lag_prev: &mut i32,
+        pitch_lag: i32,
+        frame: &[i16],
+        fs_khz: u32,
+    ) {
+        let ltp_mem_length = fs_khz as usize * tables::LTP_MEM_LENGTH_MS;
+        let frame_len = frame.len();
+        let mv_len = ltp_mem_length.saturating_sub(frame_len);
+        if mv_len > 0 {
+            out_buf.copy_within(frame_len..frame_len + mv_len, 0);
+        }
+        out_buf[mv_len..mv_len + frame_len].copy_from_slice(frame);
+        if pitch_lag > 0 {
+            *lag_prev = pitch_lag;
+        }
+    }
+
+    /// Conceal one lost SILK or Hybrid packet using the stored PLC state.
+    ///
+    /// Params: target `samples_per_channel`, mutable interleaved `out`, and packet `loss_count`.
+    /// Returns: concealed sample count per output channel.
+    pub(crate) fn decode_lost(
+        &mut self,
+        samples_per_channel: usize,
+        out: &mut [i16],
+        loss_count: u32,
+    ) -> Result<usize, Error> {
+        let packet_channels = self.prev_packet_channels.clamp(1, 2) as usize;
+        let channels = self.channels as usize;
+        let needed = samples_per_channel * channels;
+        if out.len() < needed {
+            return Err(Error::OutputTooSmall {
+                needed,
+                got: out.len(),
+            });
+        }
+
+        let plc0 = &self.core_state[0].plc;
+        let internal_frame_samples = plc0.subfr_length.saturating_mul(plc0.nb_subfr);
+        if internal_frame_samples == 0 || plc0.fs_khz <= 0 {
+            out[..needed].fill(0);
+            return Ok(samples_per_channel);
+        }
+
+        let frame_output_samples = if self.fs_hz == 48_000 {
+            self.resampler_state[0]
+                .as_ref()
+                .map(|resampler| resampler.output_len(internal_frame_samples))
+                .unwrap_or(0)
+        } else {
+            internal_frame_samples
+        };
+        if frame_output_samples == 0 {
+            out[..needed].fill(0);
+            return Ok(samples_per_channel);
+        }
+
+        out[..needed].fill(0);
+        let conceal_frames = samples_per_channel.div_ceil(frame_output_samples);
+        let mut mono_resampler_history = self.stereo_state.s_mid;
+        let mut written_total = 0usize;
+
+        for _ in 0..conceal_frames {
+            let mut internal_pcm = [[0i16; tables::MAX_FRAME_LENGTH]; 2];
+            for (ch, frame_pcm) in internal_pcm.iter_mut().enumerate().take(packet_channels) {
+                let ch_state = &mut self.core_state[ch];
+                let frame_pcm = &mut frame_pcm[..internal_frame_samples];
+                let (plc_state, lpc_state) = (&mut ch_state.plc, &mut ch_state.s_lpc_q14_buf[..]);
+                plc::plc_conceal(plc_state, lpc_state, frame_pcm, loss_count);
+                let fs_khz = plc_state.fs_khz as u32;
+                let pitch_lag = plc_state.pitch_lag;
+                Self::refresh_conceal_history(
+                    &mut ch_state.out_buf,
+                    &mut ch_state.lag_prev,
+                    pitch_lag,
+                    frame_pcm,
+                    fs_khz,
+                );
+            }
+
+            if packet_channels == 1 {
+                self.stereo_state.s_mid.copy_from_slice(
+                    &internal_pcm[0][internal_frame_samples - 2..internal_frame_samples],
+                );
+            }
+
+            let frame_write =
+                frame_output_samples.min(samples_per_channel.saturating_sub(written_total));
+            if self.fs_hz == 48_000 {
+                let mut resampled_pcm = [[0i16; MAX_API_FRAME_SAMPLES_48K]; 2];
+                for ch in 0..packet_channels {
+                    if let Some(resampler) = self.resampler_state[ch].as_mut() {
+                        let frame_pcm = &internal_pcm[ch][..internal_frame_samples];
+                        let expected = resampler.output_len(internal_frame_samples);
+                        let written = if packet_channels == 2 {
+                            resampler.process(frame_pcm, &mut resampled_pcm[ch][..expected])
+                        } else {
+                            let mut resamp_input = vec![0i16; internal_frame_samples + 2];
+                            resamp_input[..2].copy_from_slice(&mono_resampler_history);
+                            resamp_input[2..2 + internal_frame_samples].copy_from_slice(frame_pcm);
+                            let written = resampler.process(
+                                &resamp_input[1..1 + internal_frame_samples],
+                                &mut resampled_pcm[ch][..expected],
+                            );
+                            mono_resampler_history.copy_from_slice(
+                                &frame_pcm[internal_frame_samples - 2..internal_frame_samples],
+                            );
+                            written
+                        };
+                        debug_assert_eq!(written, expected);
+                    }
+                }
+
+                for n in 0..frame_write {
+                    let left = resampled_pcm[0][n];
+                    match channels {
+                        1 => out[written_total + n] = left,
+                        2 => {
+                            let base = 2 * (written_total + n);
+                            out[base] = left;
+                            out[base + 1] = if packet_channels == 2 {
+                                resampled_pcm[1][n]
+                            } else {
+                                left
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            } else {
+                let copy_len = internal_frame_samples.min(frame_write);
+                for n in 0..copy_len {
+                    let left = internal_pcm[0][n];
+                    match channels {
+                        1 => out[written_total + n] = left,
+                        2 => {
+                            let base = 2 * (written_total + n);
+                            out[base] = left;
+                            out[base + 1] = if packet_channels == 2 {
+                                internal_pcm[1][n]
+                            } else {
+                                left
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+
+            written_total += frame_write;
+            if written_total >= samples_per_channel {
+                break;
+            }
+        }
+
+        Ok(samples_per_channel)
     }
 
     /// Decode one SILK Opus frame payload.
@@ -621,6 +787,9 @@ fn consume_main_payload(
     for i in 0..internal_frames {
         let mut decode_only_middle = false;
         let mut pred_q13 = [0i32; 2];
+        let mut decoded_frames: [Option<plc::SilkDecodedFrame>; 2] = [None, None];
+        let mut plc_lpc_q12 = [[0i32; tables::MAX_LPC_ORDER]; 2];
+        let mut plc_nb_coefs = [0usize; 2];
         if packet_channels == 2 {
             pred_q13 = stereo::decode_stereo_pred(dec);
             decode_only_middle = !header.channels[1].vad_flags[i] && stereo::decode_mid_only(dec);
@@ -766,6 +935,47 @@ fn consume_main_payload(
                 packet_idx,
                 i,
             );
+            let mut ltp_gains = [0i32; tables::MAX_NB_SUBFR];
+            let lag = if frame_params.signal_type == TYPE_VOICED {
+                let pitch_lags = pitch::decode_pitch_lags(
+                    frame_params.lag_index as i32,
+                    frame_params.contour_index as i32,
+                    frame_params.fs_khz as i32,
+                    frame_params.nb_subfr,
+                );
+                let (ltp_coeffs_q14, _) = ltp::decode_ltp_coeffs(
+                    frame_params.per_index,
+                    &frame_params.ltp_indices,
+                    frame_params.nb_subfr,
+                    frame_params.ltp_scale_index,
+                );
+                for (subframe_idx, gain) in
+                    ltp_gains.iter_mut().enumerate().take(frame_params.nb_subfr)
+                {
+                    let summed_q14 = ltp_coeffs_q14[subframe_idx]
+                        .iter()
+                        .map(|coef| i32::from(*coef))
+                        .sum::<i32>()
+                        .max(0);
+                    *gain = summed_q14.clamp(0, 1 << 16);
+                }
+                pitch_lags[frame_params.nb_subfr - 1]
+            } else {
+                0
+            };
+            for (dst, src) in plc_lpc_q12[ch]
+                .iter_mut()
+                .zip(pred_coef_q12[ch][i][1].iter())
+                .take(frame_params.lpc_order)
+            {
+                *dst = i32::from(*src);
+            }
+            plc_nb_coefs[ch] = frame_params.lpc_order;
+            decoded_frames[ch] = Some(plc::SilkDecodedFrame {
+                lag,
+                ltp_gains,
+                output: Vec::new(),
+            });
             if trace_pkt0 && packet_idx == 0 && i == 0 && ch == 0 {
                 trace_core(packet_idx, "exc_Q14", &trace.exc_q14_head);
                 trace_core(packet_idx, "sLPC_Q14", &trace.s_lpc_q14_head);
@@ -792,6 +1002,25 @@ fn consume_main_payload(
             stereo_state
                 .s_mid
                 .copy_from_slice(&frame[frame_length - 2..frame_length]);
+        }
+
+        let pcm_range = i * frame_length..(i + 1) * frame_length;
+        for ch in 0..packet_channels {
+            let Some(mut decoded_frame) = decoded_frames[ch].take() else {
+                continue;
+            };
+            decoded_frame
+                .output
+                .extend_from_slice(&internal_pcm[ch][pcm_range.clone()]);
+            plc::plc_update(
+                &mut core_state[ch].plc,
+                &decoded_frame,
+                &plc_lpc_q12[ch][..plc_nb_coefs[ch]],
+                states[ch].nb_subfr,
+                frame_length / states[ch].nb_subfr,
+                states[ch].fs_khz as i32,
+                plc_nb_coefs[ch],
+            );
         }
 
         *prev_decode_only_middle = decode_only_middle;

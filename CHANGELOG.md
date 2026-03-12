@@ -15,6 +15,13 @@
   `OpusDecoder::{decode, decode_float}` handle `packet=[]` and `fec=true` as PLC;
   `Decoder` tracks `loss_count`, `last_packet_duration`. Added `plc_smoke_test`
   (ignored) on testvector07. Clippy clean, RFC conformance: 12/12 PASS.
+- feat(plc): Phase 5b – new `silk/plc.rs` with `SilkPlcState`, `plc_update()`
+  and `plc_conceal()`; pitch/LPC/output saved after each good SILK frame;
+  SilkOnly/Hybrid loss path replaced with real pitch-extrapolation PLC reusing
+  existing `resampler_state` (continuous state). Hybrid uses SILK PLC without
+  separate CELT highband PLC (acceptable for now). Reference read from
+  `/tmp/libopus-tv09/silk/` (local mirror). Clippy clean, plc_smoke_test PASS,
+  RFC conformance: 12/12 PASS.
 
 ## 2026-03-09
 
