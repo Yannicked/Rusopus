@@ -7,6 +7,7 @@ use opus_decoder::{OpusDecoder, OpusMultistreamDecoder};
 ///
 /// Parameters: none.
 /// Returns: nothing; panics on invalid mapping or decode behavior.
+#[ignore = "requires OPUS_TESTVECTORS_DIR"]
 #[test]
 fn multistream_stereo_call_recording() {
     let packets = load_packets("testvector07").unwrap();
@@ -28,6 +29,7 @@ fn multistream_stereo_call_recording() {
 ///
 /// Parameters: none.
 /// Returns: nothing; panics on invalid output.
+#[ignore = "requires OPUS_TESTVECTORS_DIR"]
 #[test]
 fn multistream_silence_channel() {
     let packets = load_packets("testvector07").unwrap();
