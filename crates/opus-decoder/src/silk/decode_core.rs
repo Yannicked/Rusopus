@@ -207,7 +207,7 @@ pub(super) fn decode_core(
                     params.lpc_order,
                 );
                 if k == 0 {
-                    inv_gain_q31 = (smulwb(inv_gain_q31, ltp_scale_q14) << 2) as i32;
+                    inv_gain_q31 = smulwb(inv_gain_q31, ltp_scale_q14) << 2;
                 }
                 for i in 0..(pitch_lag as usize + LTP_ORDER / 2) {
                     ltp_history_q15[ltp_buf_idx - i - 1] =

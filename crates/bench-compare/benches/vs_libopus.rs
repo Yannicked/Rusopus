@@ -89,10 +89,10 @@ fn bench_celt_mono(c: &mut Criterion) {
             let mut dec = OpusDecoder::new(48_000, 1).expect("failed to create Rust decoder");
             let mut pcm = vec![0i16; pcm_len];
             for pkt in &packets {
-                black_box(
-                    dec.decode(pkt, &mut pcm, false)
-                        .expect("Rust decode failed"),
-                );
+                let written = dec
+                    .decode(pkt, &mut pcm, false)
+                    .expect("Rust decode failed");
+                black_box(&pcm[..written]);
             }
         })
     });
@@ -104,7 +104,7 @@ fn bench_celt_mono(c: &mut Criterion) {
             for pkt in &packets {
                 let written = dec.decode(pkt, &mut pcm);
                 assert!(written >= 0, "libopus decode failed: {written}");
-                black_box(written);
+                black_box(&pcm[..written as usize]);
             }
         })
     });
@@ -130,10 +130,10 @@ fn bench_silk_nb(c: &mut Criterion) {
             let mut dec = OpusDecoder::new(8_000, 1).expect("failed to create Rust decoder");
             let mut pcm = vec![0i16; pcm_len];
             for pkt in &packets {
-                black_box(
-                    dec.decode(pkt, &mut pcm, false)
-                        .expect("Rust decode failed"),
-                );
+                let written = dec
+                    .decode(pkt, &mut pcm, false)
+                    .expect("Rust decode failed");
+                black_box(&pcm[..written]);
             }
         })
     });
@@ -145,7 +145,7 @@ fn bench_silk_nb(c: &mut Criterion) {
             for pkt in &packets {
                 let written = dec.decode(pkt, &mut pcm);
                 assert!(written >= 0, "libopus decode failed: {written}");
-                black_box(written);
+                black_box(&pcm[..written as usize]);
             }
         })
     });
@@ -171,10 +171,10 @@ fn bench_hybrid_fb(c: &mut Criterion) {
             let mut dec = OpusDecoder::new(48_000, 2).expect("failed to create Rust decoder");
             let mut pcm = vec![0i16; pcm_len];
             for pkt in &packets {
-                black_box(
-                    dec.decode(pkt, &mut pcm, false)
-                        .expect("Rust decode failed"),
-                );
+                let written = dec
+                    .decode(pkt, &mut pcm, false)
+                    .expect("Rust decode failed");
+                black_box(&pcm[..written * 2]);
             }
         })
     });
@@ -186,7 +186,7 @@ fn bench_hybrid_fb(c: &mut Criterion) {
             for pkt in &packets {
                 let written = dec.decode(pkt, &mut pcm);
                 assert!(written >= 0, "libopus decode failed: {written}");
-                black_box(written);
+                black_box(&pcm[..written as usize * 2]);
             }
         })
     });

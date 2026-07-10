@@ -12,6 +12,7 @@ const LOG2_FRAC_TABLE: [u8; 24] = [
     0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37,
 ];
 const LOG_MAX_PSEUDO: usize = 6;
+const MAX_BANDS: usize = 21;
 
 /// Convert pseudo-pulse index to real pulse count.
 ///
@@ -77,9 +78,9 @@ pub(crate) struct AllocationResult {
     pub intensity: i32,
     pub dual_stereo: i32,
     pub balance: i32,
-    pub pulses: Vec<i32>,
-    pub fine_quant: Vec<i32>,
-    pub fine_priority: Vec<i32>,
+    pub pulses: [i32; MAX_BANDS],
+    pub fine_quant: [i32; MAX_BANDS],
+    pub fine_priority: [i32; MAX_BANDS],
 }
 
 /// Initialize CELT per-band bit caps for given `LM` and channel count.
@@ -87,9 +88,10 @@ pub(crate) struct AllocationResult {
 /// Params: `mode` is CELT mode table, `lm` is frame size log ratio, `channels`
 /// is decode channel count.
 /// Returns: per-band cap values in BITRES units.
-pub(crate) fn init_caps(mode: &CeltMode, lm: usize, channels: usize) -> Vec<i32> {
-    let mut cap = vec![0i32; mode.nb_ebands];
-    for (i, cap_i) in cap.iter_mut().enumerate() {
+pub(crate) fn init_caps(mode: &CeltMode, lm: usize, channels: usize) -> [i32; MAX_BANDS] {
+    debug_assert!(mode.nb_ebands <= MAX_BANDS);
+    let mut cap = [0i32; MAX_BANDS];
+    for (i, cap_i) in cap.iter_mut().enumerate().take(mode.nb_ebands) {
         let n = ((mode.e_bands[i + 1] - mode.e_bands[i]) as usize) << lm;
         let idx = mode.nb_ebands * (2 * lm + channels - 1) + i;
         *cap_i = (((mode.cache.caps[idx] as i32) + 64) * channels as i32 * n as i32) >> 2;
@@ -142,10 +144,11 @@ pub(crate) fn clt_compute_allocation(
     }
 
     let len = mode.nb_ebands;
-    let mut bits1 = vec![0i32; len];
-    let mut bits2 = vec![0i32; len];
-    let mut thresh = vec![0i32; len];
-    let mut trim_offset = vec![0i32; len];
+    debug_assert!(len <= MAX_BANDS);
+    let mut bits1 = [0i32; MAX_BANDS];
+    let mut bits2 = [0i32; MAX_BANDS];
+    let mut thresh = [0i32; MAX_BANDS];
+    let mut trim_offset = [0i32; MAX_BANDS];
     let c = channels as i32;
     for j in start..end {
         let band_n = (mode.e_bands[j + 1] - mode.e_bands[j]) as i32;
@@ -217,9 +220,9 @@ pub(crate) fn clt_compute_allocation(
         bits2[j] = bits2j;
     }
 
-    let mut pulses = vec![0i32; len];
-    let mut fine_quant = vec![0i32; len];
-    let mut fine_priority = vec![0i32; len];
+    let mut pulses = [0i32; MAX_BANDS];
+    let mut fine_quant = [0i32; MAX_BANDS];
+    let mut fine_priority = [0i32; MAX_BANDS];
     let mut intensity = 0i32;
     let mut dual_stereo = 0i32;
     let (coded_bands, balance) = interp_bits2pulses(

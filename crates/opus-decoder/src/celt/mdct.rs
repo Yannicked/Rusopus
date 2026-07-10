@@ -5,7 +5,7 @@
 //! Current scope is a decoder-oriented path for 48 kHz / 20 ms (`LM=3`), with
 //! explicit overlap/window processing kept close to libopus flow.
 
-use crate::celt::kiss_fft::{KissFft, flat_fft_forward};
+use crate::celt::kiss_fft::KissFft;
 
 /// Backward MDCT helper for CELT decode path.
 #[derive(Debug, Clone)]
@@ -14,6 +14,9 @@ pub(crate) struct MdctBackward {
     overlap: usize,
     fft: KissFft,
     trig: Vec<f32>,
+    fft_input: Vec<f32>,
+    fft_output: Vec<f32>,
+    fft_scratch: Vec<f32>,
 }
 
 impl MdctBackward {
@@ -34,6 +37,9 @@ impl MdctBackward {
             overlap,
             fft: KissFft::new(n / 4),
             trig,
+            fft_input: vec![0.0; n2],
+            fft_output: vec![0.0; n2],
+            fft_scratch: vec![0.0; n2],
         }
     }
 
@@ -59,7 +65,7 @@ impl MdctBackward {
     /// samples, `out` has length at least `N/2 + overlap`.
     /// Returns: `Ok(())` on success, otherwise a static validation error.
     pub fn backward(
-        &self,
+        &mut self,
         input: &[f32],
         window: &[f32],
         out: &mut [f32],
@@ -143,7 +149,7 @@ impl MdctBackward {
             }
         }
         // Flat interleaved buffer: [re0, im0, re1, im1, ...]
-        let mut f2 = vec![0.0f32; n2];
+        let f2 = &mut self.fft_input;
         let t = &self.trig;
         let impulse_mode =
             input.first().copied() == Some(1.0) && input.iter().skip(1).all(|&v| v == 0.0);
@@ -209,8 +215,9 @@ impl MdctBackward {
             debug_trace!("MDCT1920 fft_in sum: ({:.6},{:.6})", sum_re, sum_im);
         }
 
-        let mut f2_out = vec![0.0f32; n2];
-        flat_fft_forward(&f2, &mut f2_out, n4);
+        let f2_out = &mut self.fft_output;
+        self.fft
+            .fft_flat_with_scratch(f2, f2_out, &mut self.fft_scratch)?;
         if impulse_mode && f2_out.len() >= 8 {
             debug_trace!(
                 "IMPULSE f2_out[0..8]: {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
@@ -517,7 +524,7 @@ mod tests {
 
     #[test]
     fn mdct_backward_validates_lengths() {
-        let mdct = MdctBackward::new(960, 120);
+        let mut mdct = MdctBackward::new(960, 120);
         let input = vec![0.0f32; 480];
         let window = vec![1.0f32; 120];
         let mut out = vec![0.0f32; 960];

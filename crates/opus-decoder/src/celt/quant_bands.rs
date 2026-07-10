@@ -11,7 +11,6 @@
 use crate::celt::laplace::ec_laplace_decode;
 use crate::celt::modes::CeltMode;
 use crate::entropy::EcDec;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_FINE_BITS: i32 = 8;
 const E_MEANS: [f32; 25] = [
@@ -32,9 +31,6 @@ const BETA_COEF: [f32; 4] = [
 ];
 const BETA_INTRA: f32 = 4915.0 / 32768.0;
 const SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
-static TRACE_COARSE_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
-static TRACE_FINE_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
-static TRACE_FINALISE_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 const E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
     [
@@ -104,7 +100,7 @@ pub(crate) fn unquant_coarse_energy(
     total_bits: i32,
 ) {
     let target_idx = None;
-    let coarse_call_idx = TRACE_COARSE_CALL_IDX.fetch_add(1, Ordering::SeqCst);
+    let coarse_call_idx = usize::MAX;
     let trace_this_call = target_idx == Some(coarse_call_idx);
     if trace_this_call {
         debug_trace!(
@@ -189,7 +185,7 @@ pub(crate) fn unquant_fine_energy(
     packet_idx: usize,
 ) {
     let target_idx = None;
-    let fine_call_idx = TRACE_FINE_CALL_IDX.fetch_add(1, Ordering::SeqCst);
+    let fine_call_idx = usize::MAX;
     for i in start..end {
         let extra = extra_quant[i];
         if extra <= 0 {
@@ -235,7 +231,7 @@ pub(crate) fn unquant_energy_finalise(
     channels: usize,
 ) {
     let target_idx = None;
-    let finalise_call_idx = TRACE_FINALISE_CALL_IDX.fetch_add(1, Ordering::SeqCst);
+    let finalise_call_idx = usize::MAX;
     let mut bits_left_mut = bits_left;
     let mut old_opt = old_ebands;
     for prio in 0..2 {

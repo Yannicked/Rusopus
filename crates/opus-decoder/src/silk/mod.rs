@@ -925,7 +925,7 @@ fn consume_main_payload(
                 fs_khz: states[ch].fs_khz,
                 lpc_order: tables::nlsf_codebook(states[ch].fs_khz).order,
             };
-            signal_types[ch][i] = frame_params.signal_type as i32;
+            signal_types[ch][i] = frame_params.signal_type;
             let pcm_range = i * frame_length..(i + 1) * frame_length;
             let trace = decode_core::decode_core(
                 &frame_params,
