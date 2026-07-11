@@ -116,7 +116,7 @@ pub(crate) fn anti_collapse(
             continue;
         }
         let depth = (((1 + pulses[i].max(0)) as usize) / n0) >> lm;
-        let thresh = 0.5 * (2.0f32).powf(-0.125 * depth as f32);
+        let thresh = 0.5 * (-0.125 * depth as f32).exp2();
         let sqrt_1 = 1.0 / ((n0 << lm) as f32).sqrt();
         let band_start = (mode.e_bands[i] as usize) << lm;
         let band_len = n0 << lm;
@@ -139,7 +139,7 @@ pub(crate) fn anti_collapse(
                 prev2 = prev2.max(prev2_log_e[nb + i]);
             }
             let ediff = (log_e[c * nb + i] - prev1.min(prev2)).max(0.0);
-            let mut r = 2.0 * (2.0f32).powf(-ediff);
+            let mut r = 2.0 * (-ediff).exp2();
             if lm == 3 {
                 r *= std::f32::consts::SQRT_2;
             }
@@ -2206,7 +2206,7 @@ pub(crate) fn denormalise_bands(
         let j0 = m * mode.e_bands[i] as usize;
         let j1 = m * mode.e_bands[i + 1] as usize;
         let lg = band_loge[i] + quant_bands::e_means()[i];
-        let g = 2.0f32.powf(lg.max(-32.0));
+        let g = lg.max(-32.0).exp2();
         for j in j0..j1 {
             freq[j] = x[j] * g;
         }

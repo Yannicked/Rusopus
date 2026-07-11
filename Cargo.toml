@@ -10,3 +10,10 @@ members = [
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

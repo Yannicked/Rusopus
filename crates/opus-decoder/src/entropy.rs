@@ -342,7 +342,7 @@ impl<'a> EcDec<'a> {
         let mut ftb = ec_ilog(ftm1);
         if ftb > EC_UINT_BITS {
             ftb -= EC_UINT_BITS;
-            let ft = (ftm1 >> ftb) as u32 + 1;
+            let ft = (ftm1 >> ftb) + 1;
             let s = self.decode(ft);
             self.update(s, s + 1, ft);
             let t = (s << ftb) | self.dec_bits(ftb as u32);

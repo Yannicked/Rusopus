@@ -41,6 +41,18 @@ fn exp_rotation1(x: &mut [f32], stride: usize, c: f32, s: f32) {
     }
 }
 
+/// Approximate sine and cosine on the CELT rotation range `[0, pi/4]`.
+#[inline(always)]
+fn rotation_sin_cos(angle: f32) -> (f32, f32) {
+    let angle2 = angle * angle;
+    let sin =
+        angle * (1.0 + angle2 * (-1.0 / 6.0 + angle2 * (1.0 / 120.0 + angle2 * (-1.0 / 5_040.0))));
+    let cos = 1.0
+        + angle2
+            * (-0.5 + angle2 * (1.0 / 24.0 + angle2 * (-1.0 / 720.0 + angle2 * (1.0 / 40_320.0))));
+    (sin, cos)
+}
+
 /// Apply CELT spreading rotation.
 ///
 /// Params: mutable band vector, direction, stride, pulses and spread mode.
@@ -54,8 +66,7 @@ fn exp_rotation(x: &mut [f32], dir: i32, stride: usize, k: i32, spread: i32) {
     let gain = x.len() as f32 / (x.len() as f32 + factor as f32 * k as f32);
     let theta = 0.5 * gain * gain;
     let angle = core::f32::consts::FRAC_PI_2 * theta;
-    let c = angle.cos();
-    let s = angle.sin();
+    let (s, c) = rotation_sin_cos(angle);
     let mut stride2 = 0usize;
     if x.len() >= 8 * stride {
         stride2 = 1;
@@ -172,5 +183,20 @@ pub(crate) fn renormalise_vector(x: &mut [f32], gain: f32) {
     let g = gain / e.sqrt();
     for v in x.iter_mut() {
         *v *= g;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rotation_sin_cos;
+
+    #[test]
+    fn rotation_approximation_matches_standard_trigonometry() {
+        for step in 0..=256 {
+            let angle = core::f32::consts::FRAC_PI_4 * step as f32 / 256.0;
+            let (sin, cos) = rotation_sin_cos(angle);
+            assert!((sin - angle.sin()).abs() < 4e-7);
+            assert!((cos - angle.cos()).abs() < 4e-7);
+        }
     }
 }

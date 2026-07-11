@@ -15,7 +15,6 @@
 
 use crate::Error;
 use crate::entropy::EcDec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod bands;
 mod cwrs;
@@ -47,7 +46,6 @@ const TF_SELECT_TABLE: [[i8; 8]; 4] = [
     [0, -2, 0, -3, 2, 0, 1, -1],
     [0, -2, 0, -3, 3, 0, 1, -1],
 ];
-static TRACE_PACKET_CALL_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// Result of decoding one CELT frame.
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +73,7 @@ pub(crate) struct CeltDecoder {
     old_log_energy2: Vec<f32>,
     background_log_energy: Vec<f32>,
     deemph_mem: Vec<f32>,
+    output_scratch: Vec<f32>,
     end_band_override: Option<usize>,
     postfilter_period: i32,
     postfilter_period_old: i32,
@@ -112,6 +111,7 @@ impl CeltDecoder {
             old_log_energy2: vec![LOG_ENERGY_FLOOR_DB; NBANDS_48K_20MS * state_ch],
             background_log_energy: vec![0.0; NBANDS_48K_20MS * state_ch],
             deemph_mem: vec![0.0; state_ch],
+            output_scratch: vec![0.0; 960],
             end_band_override: None,
             postfilter_period: 0,
             postfilter_period_old: 0,
@@ -138,6 +138,7 @@ impl CeltDecoder {
         self.old_log_energy2.fill(LOG_ENERGY_FLOOR_DB);
         self.background_log_energy.fill(0.0);
         self.deemph_mem.fill(0.0);
+        self.output_scratch.fill(0.0);
         self.end_band_override = None;
         self.postfilter_period = 0;
         self.postfilter_period_old = 0;
@@ -309,10 +310,10 @@ impl CeltDecoder {
             false,
             self.mode.window,
             self.mode.overlap,
-            &self.mdct,
-            &self.mdct_480,
-            &self.mdct_240,
-            &self.mdct_short,
+            &mut self.mdct,
+            &mut self.mdct_480,
+            &mut self.mdct_240,
+            &mut self.mdct_short,
             &mut self.decode_mem,
         )
         .is_err()
@@ -350,10 +351,10 @@ impl CeltDecoder {
                 false,
                 self.mode.window,
                 self.mode.overlap,
-                &self.mdct,
-                &self.mdct_480,
-                &self.mdct_240,
-                &self.mdct_short,
+                &mut self.mdct,
+                &mut self.mdct_480,
+                &mut self.mdct_240,
+                &mut self.mdct_short,
                 &mut self.decode_mem_right,
             )
             .is_err()
@@ -383,13 +384,13 @@ impl CeltDecoder {
 
         let out_start = Self::out_start(frame_size_48k);
         let mut left = self.decode_mem[out_start..out_start + frame_size_48k].to_vec();
-        self.apply_deemph(0, &mut left);
+        Self::apply_deemph(self.mode.preemph[0], &mut self.deemph_mem[0], &mut left);
         for i in 0..frame_size {
             pcm[i * active_channels] = left[i * downsample];
         }
         if active_channels == 2 {
             let mut right = self.decode_mem_right[out_start..out_start + frame_size_48k].to_vec();
-            self.apply_deemph(1, &mut right);
+            Self::apply_deemph(self.mode.preemph[0], &mut self.deemph_mem[1], &mut right);
             for i in 0..frame_size {
                 pcm[i * 2 + 1] = right[i * downsample];
             }
@@ -540,17 +541,14 @@ impl CeltDecoder {
     ///
     /// Params: `ch` is channel index, `samples` are per-channel samples.
     /// Returns: nothing.
-    fn apply_deemph(&mut self, ch: usize, samples: &mut [f32]) {
-        let coef = self.mode.preemph[0];
-        let mut mem = self.deemph_mem[ch];
+    fn apply_deemph(coef: f32, mem: &mut f32, samples: &mut [f32]) {
         for x in samples.iter_mut() {
             // libopus recurrence:
             // tmp = x + m; m = coef * tmp; output = tmp
-            let tmp = *x + mem;
-            mem = coef * tmp;
+            let tmp = *x + *mem;
+            *mem = coef * tmp;
             *x = tmp;
         }
-        self.deemph_mem[ch] = mem;
     }
 
     /// Apply CELT pitch comb postfilter in-place on decoder memory.
@@ -668,10 +666,10 @@ impl CeltDecoder {
         is_transient: bool,
         window: &[f32],
         overlap: usize,
-        mdct: &mdct::MdctBackward,
-        mdct_480: &mdct::MdctBackward,
-        mdct_240: &mdct::MdctBackward,
-        mdct_short: &mdct::MdctBackward,
+        mdct: &mut mdct::MdctBackward,
+        mdct_480: &mut mdct::MdctBackward,
+        mdct_240: &mut mdct::MdctBackward,
+        mdct_short: &mut mdct::MdctBackward,
         decode_mem: &mut [f32],
     ) -> Result<(), Error> {
         let decode_len = DECODE_BUFFER_SIZE + overlap;
@@ -695,7 +693,7 @@ impl CeltDecoder {
                     .map_err(|_| Error::NotImplemented)?;
             }
         } else {
-            let mdct_impl = match frame_size_48k {
+            let mdct_impl: &mut mdct::MdctBackward = match frame_size_48k {
                 120 => mdct_short,
                 240 => mdct_240,
                 480 => mdct_480,
@@ -755,7 +753,7 @@ impl CeltDecoder {
         out: &mut [i16],
         accum: bool,
     ) -> Result<CeltFrameDecode, Error> {
-        let frame_call_idx = TRACE_PACKET_CALL_IDX.fetch_add(1, Ordering::SeqCst);
+        let frame_call_idx = usize::MAX;
         let _ = parent_packet_idx;
         let packet_idx = usize::MAX;
         let output_samples = self.output_frame_size(frame_size_48k)?;
@@ -926,48 +924,6 @@ impl CeltDecoder {
                 postfilter_tapset
             );
         }
-        // #region agent log
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
-        {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let line = format!(
-                "{{\"sessionId\":\"4200c5\",\"runId\":\"run-postfilter-overlap-scan\",\"hypothesisId\":\"H10\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:227\",\"message\":\"postfilter_decoded\",\"data\":{{\"packet_idx\":{},\"coded_channels\":{},\"postfilter_active\":{},\"postfilter_pitch\":{},\"postfilter_qg\":{},\"postfilter_tapset\":{}}},\"timestamp\":{}}}\n",
-                packet_idx,
-                coded_channels,
-                postfilter_pitch > 0,
-                postfilter_pitch,
-                postfilter_qg,
-                postfilter_tapset,
-                ts
-            );
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-        }
-        // #endregion
-        if postfilter_pitch > 0 {
-            // #region agent log
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = format!(
-                    "{{\"sessionId\":\"4200c5\",\"runId\":\"run-postfilter-overlap-scan\",\"hypothesisId\":\"H11\",\"location\":\"crates/opus-decoder/src/celt/mod.rs:249\",\"message\":\"postfilter_active_but_not_applied_in_rust\",\"data\":{{\"packet_idx\":{},\"postfilter_pitch\":{},\"postfilter_qg\":{},\"postfilter_tapset\":{},\"comb_filter_applied\":false}},\"timestamp\":{}}}\n",
-                    packet_idx, postfilter_pitch, postfilter_qg, postfilter_tapset, ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            // #endregion
-        }
         tell = ec.tell();
         if trace_this_packet {
             debug_trace!(
@@ -1052,7 +1008,7 @@ impl CeltDecoder {
             );
         }
         trace_pkt38_stage("coarse", &ec);
-        let mut tf_res = vec![0i32; self.mode.nb_ebands];
+        let mut tf_res = [0i32; NBANDS_48K_20MS];
         tf_decode(
             start,
             end,
@@ -1099,7 +1055,7 @@ impl CeltDecoder {
         }
         trace_pkt38_stage("spread", &ec);
         let cap = rate::init_caps(self.mode, lm, coded_channels);
-        let mut offsets = vec![0i32; self.mode.nb_ebands];
+        let mut offsets = [0i32; NBANDS_48K_20MS];
         let mut dynalloc_logp = 6i32;
         let mut total_bits_q = total_bits << BITRES;
         tell = ec.tell_frac() as i32;
@@ -1225,7 +1181,7 @@ impl CeltDecoder {
                 anti_collapse_rsv
             );
         }
-        if debug_packet || intra_ener {
+        if debug_packet {
             let data = format!(
                 "{{\"packet_idx\":{},\"config\":{},\"end\":{},\"lm\":{},\"is_transient\":{},\"intra_ener\":{},\"postfilter_active\":{},\"postfilter_pitch\":{},\"postfilter_qg\":{},\"postfilter_tapset\":{},\"anti_collapse_rsv\":{}}}",
                 packet_idx,
@@ -1485,27 +1441,6 @@ impl CeltDecoder {
                 "H2",
                 "crates/opus-decoder/src/celt/mod.rs:decode_frame",
                 "anti_collapse_post_quant_state",
-                &data,
-            );
-            // #endregion
-        }
-        if packet_idx <= 10 || coded_channels == 2 {
-            let data = format!(
-                "{{\"packet_idx\":{},\"coded_channels\":{},\"output_channels\":{},\"is_transient\":{},\"lm\":{},\"anti_collapse_rsv\":{},\"collapse_nonfull_count\":{}}}",
-                packet_idx,
-                coded_channels,
-                self.channels,
-                is_transient,
-                lm,
-                anti_collapse_rsv,
-                collapse_nonfull_count
-            );
-            // #region agent log
-            Self::append_runtime_debug_log(
-                "run-coded-channels-scan-v1",
-                "H9",
-                "crates/opus-decoder/src/celt/mod.rs:decode_frame",
-                "coded_channels_state",
                 &data,
             );
             // #endregion
@@ -2436,11 +2371,11 @@ impl CeltDecoder {
             }
         } else {
             // Long block path for all supported frame sizes.
-            let mdct_impl = match frame_size_48k {
-                120 => &self.mdct_short,
-                240 => &self.mdct_240,
-                480 => &self.mdct_480,
-                960 => &self.mdct,
+            let mdct_impl: &mut mdct::MdctBackward = match frame_size_48k {
+                120 => &mut self.mdct_short,
+                240 => &mut self.mdct_240,
+                480 => &mut self.mdct_480,
+                960 => &mut self.mdct,
                 _ => return Err(Error::NotImplemented),
             };
             mdct_impl
@@ -2677,10 +2612,10 @@ impl CeltDecoder {
                     is_transient,
                     window,
                     overlap,
-                    &self.mdct,
-                    &self.mdct_480,
-                    &self.mdct_240,
-                    &self.mdct_short,
+                    &mut self.mdct,
+                    &mut self.mdct_480,
+                    &mut self.mdct_240,
+                    &mut self.mdct_short,
                     &mut self.decode_mem_right,
                 )?;
             } else {
@@ -2691,10 +2626,10 @@ impl CeltDecoder {
                     is_transient,
                     window,
                     overlap,
-                    &self.mdct,
-                    &self.mdct_480,
-                    &self.mdct_240,
-                    &self.mdct_short,
+                    &mut self.mdct,
+                    &mut self.mdct_480,
+                    &mut self.mdct_240,
+                    &mut self.mdct_short,
                     &mut self.decode_mem_right,
                 )?;
             }
@@ -3178,8 +3113,14 @@ impl CeltDecoder {
             } else {
                 &self.decode_mem_right
             };
-            let mut ch_synth = decode_mem_ch[out_start..out_start + frame_size_48k].to_vec();
-            self.apply_deemph(ch, &mut ch_synth);
+            self.output_scratch[..frame_size_48k]
+                .copy_from_slice(&decode_mem_ch[out_start..out_start + frame_size_48k]);
+            Self::apply_deemph(
+                self.mode.preemph[0],
+                &mut self.deemph_mem[ch],
+                &mut self.output_scratch[..frame_size_48k],
+            );
+            let ch_synth = &self.output_scratch[..frame_size_48k];
             if packet_idx == 6 && ch == 0 {
                 let post_abs_sum: f32 = ch_synth.iter().map(|x| x.abs()).sum();
                 let data = format!(
